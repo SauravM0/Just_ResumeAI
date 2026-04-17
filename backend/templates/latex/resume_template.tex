@@ -1,0 +1,154 @@
+\documentclass[letterpaper,11pt]{article}
+
+\usepackage[empty]{fullpage}
+\usepackage{titlesec}
+\usepackage[usenames,dvipsnames]{color}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{fancyhdr}
+\usepackage[english]{babel}
+\usepackage{tabularx}
+\input{glyphtounicode}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyfoot{}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+\addtolength{\oddsidemargin}{-0.5in}
+\addtolength{\evensidemargin}{-0.5in}
+\addtolength{\textwidth}{1in}
+\addtolength{\topmargin}{-.5in}
+\addtolength{\textheight}{1.0in}
+
+\urlstyle{same}
+
+\raggedbottom
+\raggedright
+\setlength{\tabcolsep}{0in}
+
+\titleformat{\section}{
+  \vspace{-4pt}\scshape\raggedright\large
+}{}{0em}{}[\color{black}\titlerule \vspace{-5pt}]
+
+\pdfgentounicode=1
+
+\newcommand{\resumeItem}[1]{
+  \item\small{
+    {#1 \vspace{-2pt}}
+  }
+}
+
+\newcommand{\resumeSubheading}[4]{
+  \vspace{-2pt}\item
+    \begin{tabular*}{0.97\textwidth}[t]{l@{\extracolsep{\fill}}r}
+      \textbf{#1} & #2 \\
+      \textit{\small#3} & \textit{\small #4} \\
+    \end{tabular*}\vspace{-7pt}
+}
+
+\newcommand{\resumeProjectHeading}[2]{
+    \item
+    \begin{tabular*}{0.97\textwidth}{l@{\extracolsep{\fill}}r}
+      \small#1 & #2 \\
+    \end{tabular*}\vspace{-7pt}
+}
+
+\renewcommand\labelitemii{$\vcenter{\hbox{\tiny$\bullet$}}$}
+
+\newcommand{\resumeSubHeadingListStart}{\begin{itemize}[leftmargin=0.15in, label={}]}
+\newcommand{\resumeSubHeadingListEnd}{\end{itemize}}
+\newcommand{\resumeItemListStart}{\begin{itemize}}
+\newcommand{\resumeItemListEnd}{\end{itemize}\vspace{-5pt}}
+
+\begin{document}
+
+\begin{center}
+    {\Huge \textbf{<< contact_name >>}} \\ \vspace{3pt}
+    <% if target_title %>{\small << target_title >>} \\ \vspace{3pt}<% endif %>
+    \small
+    <% if contact_email %>\href{mailto:<< contact_email >>}{\underline{<< contact_email >>}}<% endif %>
+    <% if contact_phone %> <% if contact_email %>$|$<% endif %> << contact_phone >><% endif %>
+    <% if contact_location %> <% if contact_email or contact_phone %>$|$<% endif %> << contact_location >><% endif %>
+    <% if contact_linkedin %> <% if contact_email or contact_phone or contact_location %>$|$<% endif %> \href{<< contact_linkedin >>}{\underline{LinkedIn}}<% endif %>
+    <% if contact_github %> <% if contact_email or contact_phone or contact_location or contact_linkedin %>$|$<% endif %> \href{<< contact_github >>}{\underline{GitHub}}<% endif %>
+    <% if contact_portfolio %> <% if contact_email or contact_phone or contact_location or contact_linkedin or contact_github %>$|$<% endif %> \href{<< contact_portfolio >>}{\underline{Portfolio}}<% endif %>
+\end{center}
+
+<% if summary %>
+\section{Summary}
+\small{<< summary >>}
+\vspace{-4pt}
+<% endif %>
+
+<% if experiences %>
+\section{Experience}
+  \resumeSubHeadingListStart
+    <% for exp in experiences %>
+    \resumeSubheading
+      {<< exp.title >>}{<< exp.date_range >>}
+      {<< exp.company_line >>}{}
+      \resumeItemListStart
+        <% for bullet in exp.bullets %>
+        \resumeItem{<< bullet >>}
+        <% endfor %>
+      \resumeItemListEnd
+    <% endfor %>
+  \resumeSubHeadingListEnd
+<% endif %>
+
+<% if projects %>
+\section{Projects}
+    \resumeSubHeadingListStart
+      <% for project in projects %>
+      \resumeProjectHeading
+          {\textbf{<< project.name >>}<% if project.technologies %> $|$ \emph{<< project.technologies >>}<% endif %>}{}
+          \resumeItemListStart
+            <% for bullet in project.bullets %>
+            \resumeItem{<< bullet >>}
+            <% endfor %>
+          \resumeItemListEnd
+      <% endfor %>
+    \resumeSubHeadingListEnd
+<% endif %>
+
+<% if skills %>
+\section{Technical Skills}
+ \begin{itemize}[leftmargin=0.15in, label={}]
+    \small{\item{
+     <% for skill_group in skills %>
+     \textbf{<< skill_group.category >>}{: << skill_group.skills >>}<% if not loop.last %> \\<% endif %>
+     <% endfor %>
+    }}
+ \end{itemize}
+<% endif %>
+
+<% if education %>
+\section{Education}
+  \resumeSubHeadingListStart
+    <% for edu in education %>
+    \resumeSubheading
+      {<< edu.institution >>}{<< edu.date_range >>}
+      {<< edu.degree_line >>}{<< edu.detail_line >>}
+      <% if edu.coursework %>
+      \resumeItemListStart
+        \resumeItem{Relevant Coursework: << ", ".join(edu.coursework) >>}
+      \resumeItemListEnd
+      <% endif %>
+    <% endfor %>
+  \resumeSubHeadingListEnd
+<% endif %>
+
+<% if certifications %>
+\section{Certifications}
+  \resumeSubHeadingListStart
+    <% for cert in certifications %>
+    \resumeSubheading
+      {<< cert.name >>}{<< cert.date >>}
+      {<< cert.issuer >>}{}
+    <% endfor %>
+  \resumeSubHeadingListEnd
+<% endif %>
+
+\end{document}

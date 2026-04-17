@@ -1,0 +1,174 @@
+/**
+ * Resume pipeline types — mirrors backend schemas/resume.py and schemas/scoring.py.
+ */
+
+import type { MasterProfile } from './profile';
+
+export type BulletStatus = 'pending' | 'accepted' | 'edited' | 'locked' | 'rejected';
+
+export interface ResumeBullet {
+  id: string;
+  text: string;
+  original_text?: string;
+  status: BulletStatus;
+  relevance_score: number;
+  matched_keywords: string[];
+  source_id?: string;
+}
+
+export interface ResumeExperienceEntry {
+  source_id: string;
+  company: string;
+  title: string;
+  location?: string;
+  start_date: string;
+  end_date?: string;
+  is_current: boolean;
+  bullets: ResumeBullet[];
+  included: boolean;
+  relevance_score: number;
+}
+
+export interface ResumeEducationEntry {
+  source_id: string;
+  institution: string;
+  degree: string;
+  field_of_study?: string;
+  start_date?: string;
+  end_date?: string;
+  gpa?: string;
+  honors?: string;
+  relevant_coursework: string[];
+  included: boolean;
+}
+
+export interface ResumeProjectEntry {
+  source_id: string;
+  name: string;
+  description?: string;
+  technologies: string[];
+  bullets: ResumeBullet[];
+  included: boolean;
+  relevance_score: number;
+}
+
+export interface ResumeSkillGroup {
+  category: string;
+  skills: string[];
+}
+
+export interface ResumeCertEntry {
+  source_id: string;
+  name: string;
+  issuing_org?: string;
+  date?: string;
+  included: boolean;
+}
+
+export interface ResumeContactInfo {
+  full_name: string;
+  email: string;
+  phone?: string;
+  location?: string;
+  linkedin_url?: string;
+  github_url?: string;
+  portfolio_url?: string;
+}
+
+export interface ResumeRecommendation {
+  session_id: string;
+  target_title: string;
+  summary?: string;
+  contact?: ResumeContactInfo;
+  experience: ResumeExperienceEntry[];
+  education: ResumeEducationEntry[];
+  skills: ResumeSkillGroup[];
+  projects: ResumeProjectEntry[];
+  certifications: ResumeCertEntry[];
+  emphasis?: string;
+  warnings: string[];
+}
+
+// ─── Scoring ────────────────────────────────────────────────────────────────
+
+export interface KeywordMatch {
+  keyword: string;
+  found: boolean;
+  location: string;
+}
+
+export interface KeywordScore {
+  total_keywords: number;
+  matched_keywords: number;
+  coverage_percent: number;
+  critical_missing: string[];
+  details: KeywordMatch[];
+}
+
+export interface ReadabilityScore {
+  score: number;
+  avg_bullet_length: number;
+  issues: string[];
+}
+
+export interface ATSScore {
+  overall_score: number;
+  keyword_score: KeywordScore;
+  readability_score: ReadabilityScore;
+  format_score: number;
+  warnings: string[];
+  recommendations: string[];
+}
+
+// ─── API Contracts ──────────────────────────────────────────────────────────
+
+export interface ResumeRecommendRequest {
+  session_id: string;
+  profile: MasterProfile;
+  emphasis?: string;
+  rejected_item_ids: string[];
+}
+
+export interface ResumeRecommendResponse {
+  recommendation: ResumeRecommendation;
+}
+
+export interface ResumeRegenerateRequest {
+  session_id: string;
+  profile: MasterProfile;
+  emphasis?: string;
+  locked_bullet_ids: string[];
+  rejected_item_ids: string[];
+}
+
+export interface ResumeValidateRequest {
+  session_id: string;
+  recommendation: ResumeRecommendation;
+}
+
+export interface ValidateResponse {
+  session_id: string;
+  ats_score: ATSScore;
+}
+
+export interface RenderLatexRequest {
+  session_id: string;
+  recommendation: ResumeRecommendation;
+}
+
+export interface RenderLatexResponse {
+  latex_source: string;
+  warnings: string[];
+}
+
+export interface RenderPdfRequest {
+  session_id: string;
+  latex_source: string;
+}
+
+export interface RenderPdfResponse {
+  pdf_url: string;
+  compile_success: boolean;
+  compile_errors: string[];
+  compile_warnings: string[];
+}
