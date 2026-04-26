@@ -3,6 +3,7 @@
  */
 
 import type { MasterProfile } from './profile';
+import type { ParsedJD } from './jd';
 
 export type BulletStatus = 'pending' | 'accepted' | 'edited' | 'locked' | 'rejected';
 
@@ -163,7 +164,6 @@ export interface RenderLatexResponse {
 
 export interface RenderPdfRequest {
   session_id: string;
-  latex_source: string;
 }
 
 export interface RenderPdfResponse {
@@ -171,4 +171,49 @@ export interface RenderPdfResponse {
   compile_success: boolean;
   compile_errors: string[];
   compile_warnings: string[];
+}
+
+export type EligibilityStatus = 'match' | 'partial_match' | 'hard_mismatch';
+export type PipelineStepState = 'pending' | 'success' | 'failed' | 'skipped';
+
+export interface EligibilityResult {
+  status: EligibilityStatus;
+  blocking_issues: string[];
+  warnings: string[];
+  matched_points: string[];
+}
+
+export interface PipelineStepStatus {
+  name: string;
+  status: PipelineStepState;
+  detail?: string;
+}
+
+export interface PipelineGenerateRequest {
+  profile: MasterProfile;
+  raw_jd_text: string;
+  target_pages?: number;
+  allow_two_pages_for_senior?: boolean;
+  generate_pdf?: boolean;
+  emphasis?: string;
+}
+
+export interface PipelinePdfResult {
+  requested: boolean;
+  compile_success: boolean;
+  pdf_url?: string;
+  compile_errors: string[];
+  compile_warnings: string[];
+}
+
+export interface PipelineGenerateResponse {
+  session_id: string;
+  parsed_jd: ParsedJD;
+  eligibility: EligibilityResult;
+  recommendation: ResumeRecommendation;
+  ats_score: ATSScore;
+  latex_source: string;
+  pdf: PipelinePdfResult;
+  steps: PipelineStepStatus[];
+  warnings: string[];
 }

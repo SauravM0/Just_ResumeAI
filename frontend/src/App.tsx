@@ -9,6 +9,7 @@ import MasterProfile from './pages/MasterProfile';
 import JDInput from './pages/JDInput';
 import ResumeReview from './pages/ResumeReview';
 import LatexEditor from './pages/LatexEditor';
+import CoverLetter from './pages/CoverLetter';
 import { useAppStore } from './store/useAppStore';
 import './index.css';
 
@@ -28,6 +29,7 @@ function AppLayout() {
     { path: '/jd', icon: '📋', label: 'Job Description' },
     { path: '/review', icon: '👁️', label: 'Resume Review', requiresSession: true },
     { path: '/editor', icon: '📑', label: 'LaTeX Editor', requiresSession: true },
+    { path: '/cover-letter', icon: '✉️', label: 'Cover Letter', requiresSession: true },
   ];
 
   return (
@@ -92,6 +94,7 @@ function AppLayout() {
           <Route path="/jd" element={<JDInput />} />
           <Route path="/review" element={<ResumeReview />} />
           <Route path="/editor" element={<LatexEditor />} />
+          <Route path="/cover-letter" element={<CoverLetter />} />
         </Routes>
       </main>
     </div>

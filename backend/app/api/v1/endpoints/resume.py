@@ -19,9 +19,10 @@ from app.schemas.resume import (
     ResumeRenderPdfResponse,
 )
 from app.schemas.scoring import ValidateResponse
+from app.ai.resume_fallback import generate_recommendation_without_ai
 from app.ai.orchestrators.resume_orchestrator import generate_recommendation
 from app.ai.gemini_client import GeminiClientError
-from app.services.session_service import get_session
+from app.services.session_service import get_session, save_session
 from app.services.scoring_service import compute_ats_score
 from app.services.latex_render_service import render_latex
 from app.services.pdf_compile_service import compile_pdf, PDFCompileError
@@ -65,12 +66,24 @@ async def recommend_resume(request: ResumeRecommendRequest):
 
         # Store in session
         session.recommendation = recommendation
+        session.rejected_ids = list(request.rejected_item_ids)
+        save_session(session)
 
         return ResumeRecommendResponse(recommendation=recommendation)
 
     except GeminiClientError as e:
-        logger.error(f"Resume recommendation failed: {e}")
-        raise HTTPException(status_code=502, detail=f"AI generation failed: {str(e)}")
+        logger.warning(f"Resume recommendation AI path failed, using fallback: {e}")
+        recommendation = generate_recommendation_without_ai(
+            profile=request.profile,
+            parsed_jd=parsed_jd,
+            session_id=request.session_id,
+            emphasis=request.emphasis,
+            rejected_ids=request.rejected_item_ids,
+        )
+        session.recommendation = recommendation
+        session.rejected_ids = list(request.rejected_item_ids)
+        save_session(session)
+        return ResumeRecommendResponse(recommendation=recommendation)
     except Exception as e:
         logger.error(f"Unexpected error in recommendation: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -107,11 +120,24 @@ async def regenerate_resume(request: ResumeRegenerateRequest):
         )
 
         session.recommendation = recommendation
+        session.rejected_ids = list(request.rejected_item_ids)
+        save_session(session)
         return ResumeRecommendResponse(recommendation=recommendation)
 
     except GeminiClientError as e:
-        logger.error(f"Resume regeneration failed: {e}")
-        raise HTTPException(status_code=502, detail=f"AI generation failed: {str(e)}")
+        logger.warning(f"Resume regeneration AI path failed, using fallback: {e}")
+        recommendation = generate_recommendation_without_ai(
+            profile=request.profile,
+            parsed_jd=parsed_jd,
+            session_id=request.session_id,
+            emphasis=request.emphasis,
+            rejected_ids=request.rejected_item_ids,
+            locked_bullets=locked_bullets,
+        )
+        session.recommendation = recommendation
+        session.rejected_ids = list(request.rejected_item_ids)
+        save_session(session)
+        return ResumeRecommendResponse(recommendation=recommendation)
     except Exception as e:
         logger.error(f"Unexpected error in regeneration: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -145,6 +171,7 @@ async def render_resume_latex(request: ResumeRenderLatexRequest):
     try:
         latex_source = render_latex(request.recommendation)
         session.latex_source = latex_source
+        save_session(session)
 
         return ResumeRenderLatexResponse(
             latex_source=latex_source,
@@ -163,10 +190,15 @@ async def render_resume_pdf(request: ResumeRenderPdfRequest):
     session = get_session(request.session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found or expired")
+    if not session.latex_source:
+        raise HTTPException(
+            status_code=400,
+            detail="No rendered LaTeX found in session. Call /render-latex first.",
+        )
 
     try:
         pdf_path, warnings = await compile_pdf(
-            latex_source=request.latex_source,
+            latex_source=session.latex_source,
             session_id=request.session_id,
         )
 

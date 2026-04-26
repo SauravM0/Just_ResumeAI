@@ -88,6 +88,37 @@ RESPONSIBILITY_HINTS = (
     "role overview",
 )
 
+PREFERRED_SECTION_HINTS = (
+    "preferred qualifications",
+    "preferred skills",
+    "nice to have",
+    "nice-to-have",
+    "bonus skills",
+    "good to have",
+    "desired qualifications",
+    "plus",
+    "pluses",
+)
+
+REQUIRED_OVERRIDE_HINTS = (
+    "must have",
+    "required",
+    "mandatory",
+    "minimum requirement",
+)
+
+SOFT_SKILL_HINTS = (
+    "communication",
+    "collaboration",
+    "leadership",
+    "teamwork",
+    "interpersonal",
+    "presentation",
+    "stakeholder management",
+    "written communication",
+    "verbal communication",
+)
+
 EDUCATION_PATTERNS = (
     r"\bbachelor(?:'s)? degree\b",
     r"\bmaster(?:'s)? degree\b",
@@ -97,11 +128,10 @@ EDUCATION_PATTERNS = (
 
 
 def analyze_jd_without_ai(raw_text: str) -> ParsedJD:
-    lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+    lines = _meaningful_lines(raw_text)
     lower_text = raw_text.lower()
 
-    title = _extract_title(lines)
-    company = _extract_company(lines, raw_text)
+    title, company = _extract_title_and_company(lines, raw_text)
     location = _extract_location(raw_text)
     seniority = _extract_seniority(lower_text)
     requirements = _extract_requirements(lines)
@@ -144,16 +174,6 @@ def analyze_jd_without_ai(raw_text: str) -> ParsedJD:
     )
 
 
-def _extract_title(lines: list[str]) -> str:
-    for line in lines[:5]:
-        if len(line) > 80:
-            continue
-        if any(token in line.lower() for token in ("job description", "about us", "overview")):
-            continue
-        return line
-    return "Untitled Role"
-
-
 def _extract_company(lines: list[str], raw_text: str) -> str | None:
     for line in lines[:10]:
         match = re.search(r"(?:company|employer)\s*:\s*(.+)", line, re.IGNORECASE)
@@ -170,13 +190,91 @@ def _extract_location(raw_text: str) -> str | None:
     patterns = [
         r"\b(remote|hybrid|on[- ]site)\b",
         r"\blocation\s*:\s*([^\n]+)",
-        r"\b([A-Z][a-z]+,\s*[A-Z]{2})\b",
+        r"\b([A-Z][A-Za-z.'-]*(?:[ ][A-Z][A-Za-z.'-]*)*,[ ]*[A-Z][A-Za-z.'-]*(?:[ ][A-Z][A-Za-z.'-]*)*)\b",
     ]
     for pattern in patterns:
         match = re.search(pattern, raw_text, re.IGNORECASE)
         if match:
             return match.group(1) if match.lastindex else match.group(0)
     return None
+
+
+def _meaningful_lines(raw_text: str) -> list[str]:
+    """Return trimmed, non-empty lines, skipping decorative separators."""
+    lines: list[str] = []
+    for raw_line in raw_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if re.fullmatch(r"[-_=]{3,}", line):
+            continue
+        lines.append(line)
+    return lines
+
+
+def _looks_like_location(line: str) -> bool:
+    lower = line.lower()
+    if any(token in lower for token in ("remote", "hybrid", "onsite", "on-site", "location")):
+        return True
+    if re.search(r"\b[A-Za-z .'-]+,\s*[A-Z]{2}\b", line):
+        return True
+    if re.search(r"\b[A-Za-z .'-]+,\s*[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b", line):
+        return True
+    if re.search(r"\b(united states|usa|uk|canada|india|germany|australia)\b", lower):
+        return True
+    return False
+
+
+def _looks_like_title_line(line: str) -> bool:
+    lower = line.lower()
+    if len(line) > 100:
+        return False
+    if any(token in lower for token in ("job description", "about us", "overview", "summary", "responsibilities")):
+        return False
+    title_tokens = (
+        "engineer", "developer", "manager", "analyst", "scientist", "designer", "specialist",
+        "consultant", "architect", "administrator", "director", "lead", "intern", "coordinator",
+        "officer", "associate", "recruiter", "writer",
+    )
+    return any(token in lower for token in title_tokens)
+
+
+def _looks_like_company_line(line: str) -> bool:
+    lower = line.lower()
+    if len(line) > 80 or _looks_like_location(line):
+        return False
+    if any(token in lower for token in ("requirements", "qualifications", "responsibilities", "about", "overview")):
+        return False
+    if re.search(r"\b(inc|llc|ltd|corp|corporation|company|technologies|systems|labs|group)\b", lower):
+        return True
+    if 1 <= len(line.split()) <= 6 and not line.endswith(":"):
+        return True
+    return False
+
+
+def _extract_title_and_company(lines: list[str], raw_text: str) -> tuple[str, str | None]:
+    title = "Untitled Role"
+    company: str | None = None
+
+    header_lines = lines[:6]
+    if header_lines:
+        first = header_lines[0]
+        if _looks_like_title_line(first):
+            title = first
+            if len(header_lines) > 1 and _looks_like_company_line(header_lines[1]):
+                company = header_lines[1]
+        else:
+            for line in header_lines:
+                if _looks_like_title_line(line):
+                    title = line
+                    break
+            if title == "Untitled Role" and len(first) <= 80:
+                title = first
+
+    if not company:
+        company = _extract_company(lines, raw_text)
+
+    return title, company
 
 
 def _extract_seniority(lower_text: str) -> SeniorityLevel:
@@ -189,23 +287,32 @@ def _extract_seniority(lower_text: str) -> SeniorityLevel:
 def _extract_requirements(lines: list[str]) -> list[JDRequirement]:
     requirements: list[JDRequirement] = []
     collecting = False
+    section_mode = "neutral"
 
     for line in lines:
         normalized = line.lower()
-        if any(hint in normalized for hint in REQUIREMENT_HINTS):
-            collecting = True
-            continue
-        if collecting and any(hint in normalized for hint in RESPONSIBILITY_HINTS):
-            collecting = False
+        if _is_heading_line(line):
+            if any(hint in normalized for hint in RESPONSIBILITY_HINTS):
+                collecting = False
+                section_mode = "neutral"
+                continue
+            if any(hint in normalized for hint in PREFERRED_SECTION_HINTS):
+                collecting = True
+                section_mode = "preferred"
+                continue
+            if any(hint in normalized for hint in REQUIREMENT_HINTS):
+                collecting = True
+                section_mode = "required"
+                continue
 
-        if not collecting and not line.startswith(("-", "*", "\u2022")):
+        if not collecting:
             continue
 
         text = line.lstrip("-*\u2022 ").strip()
         if len(text) < 8:
             continue
 
-        is_required = not any(hint in normalized for hint in NICE_TO_HAVE_HINTS)
+        is_required = _classify_requirement_item(text, section_mode)
         category = _categorize_requirement(text)
         requirements.append(
             JDRequirement(text=text, is_required=is_required, category=category)
@@ -220,11 +327,12 @@ def _extract_responsibilities(lines: list[str]) -> list[str]:
 
     for line in lines:
         normalized = line.lower()
-        if any(hint in normalized for hint in RESPONSIBILITY_HINTS):
+        if _is_heading_line(line) and any(hint in normalized for hint in RESPONSIBILITY_HINTS):
             collecting = True
             continue
-        if collecting and any(hint in normalized for hint in REQUIREMENT_HINTS):
+        if collecting and _is_heading_line(line) and any(hint in normalized for hint in REQUIREMENT_HINTS):
             collecting = False
+            continue
 
         if not collecting:
             continue
@@ -237,18 +345,27 @@ def _extract_responsibilities(lines: list[str]) -> list[str]:
 
 
 def _extract_skills(lower_text: str, requirements: list[JDRequirement]) -> tuple[list[str], list[str]]:
-    requirement_text = " ".join(req.text.lower() for req in requirements)
-    matched_skills: list[tuple[str, bool]] = []
+    matched_skills: dict[str, bool] = {}
 
-    for skill in COMMON_SKILLS:
-        if skill in lower_text:
-            preferred = skill in requirement_text and any(
-                hint in requirement_text for hint in NICE_TO_HAVE_HINTS
-            )
-            matched_skills.append((skill, preferred))
+    for skill in sorted(COMMON_SKILLS):
+        if skill not in lower_text:
+            continue
 
-    required = sorted({skill.title() for skill, is_preferred in matched_skills if not is_preferred})
-    preferred = sorted({skill.title() for skill, is_preferred in matched_skills if is_preferred})
+        normalized_skill = _normalize_skill_name(skill)
+        preferred = False
+
+        for requirement in requirements:
+            if skill in requirement.text.lower():
+                preferred = preferred or not requirement.is_required
+
+        existing_preferred = matched_skills.get(normalized_skill)
+        if existing_preferred is None:
+            matched_skills[normalized_skill] = preferred
+        else:
+            matched_skills[normalized_skill] = existing_preferred and preferred
+
+    required = sorted(skill for skill, is_preferred in matched_skills.items() if not is_preferred)
+    preferred = sorted(skill for skill, is_preferred in matched_skills.items() if is_preferred)
     return required[:20], preferred[:20]
 
 
@@ -284,12 +401,16 @@ def _build_keywords(
 
 
 def _extract_experience_years(lower_text: str) -> int | None:
-    match = re.search(r"(\d+)\+?\s+years? of experience", lower_text)
-    if match:
-        return int(match.group(1))
-    match = re.search(r"minimum of (\d+)\s+years?", lower_text)
-    if match:
-        return int(match.group(1))
+    patterns = [
+        r"(\d+)\s*[-–]\s*(\d+)\+?\s+years?",
+        r"(?:minimum|min\.?)\s+(\d+)\+?\s+years?",
+        r"at least\s+(\d+)\+?\s+years?",
+        r"(\d+)\+?\s+years?(?:\s+of\s+experience)?",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, lower_text)
+        if match:
+            return int(match.group(1))
     return None
 
 
@@ -357,13 +478,71 @@ def _categorize_requirement(text: str) -> str | None:
     lower = text.lower()
     if any(token in lower for token in ("degree", "bachelor", "master", "phd")):
         return "education"
-    if "year" in lower or "experience" in lower:
+    if any(token in lower for token in SOFT_SKILL_HINTS):
+        return "soft_skill"
+    if any(token in lower for token in ("year", "years", "experience")):
+        if any(token in lower for token in COMMON_SKILLS):
+            return "technical_skill"
         return "experience"
     if any(token in lower for token in COMMON_SKILLS):
         return "technical_skill"
-    if any(token in lower for token in ("communication", "collaboration", "leadership")):
-        return "soft_skill"
     return None
+
+
+def _is_heading_line(line: str) -> bool:
+    stripped = line.strip()
+    if stripped.startswith(("-", "*", "\u2022")):
+        return False
+    if stripped.endswith(":"):
+        return True
+    if len(stripped.split()) <= 6:
+        normalized = stripped.lower()
+        return any(
+            hint in normalized
+            for hint in REQUIREMENT_HINTS + RESPONSIBILITY_HINTS + PREFERRED_SECTION_HINTS
+        )
+    return False
+
+
+def _classify_requirement_item(text: str, section_mode: str = "neutral") -> bool:
+    lower = text.lower()
+    if any(hint in lower for hint in REQUIRED_OVERRIDE_HINTS):
+        return True
+    if any(hint in lower for hint in NICE_TO_HAVE_HINTS):
+        return False
+    if section_mode == "preferred":
+        return False
+    return True
+
+
+def _normalize_skill_name(skill: str) -> str:
+    overrides = {
+        "node": "Node.js",
+        "node.js": "Node.js",
+        "apis": "APIs",
+        "aws": "AWS",
+        "gcp": "GCP",
+        "sql": "SQL",
+        "html": "HTML",
+        "css": "CSS",
+        "ai": "AI",
+        "power bi": "Power BI",
+        "fastapi": "FastAPI",
+        "postgresql": "PostgreSQL",
+        "mysql": "MySQL",
+        "mongodb": "MongoDB",
+        "graphql": "GraphQL",
+        "javascript": "JavaScript",
+        "typescript": "TypeScript",
+        "react": "React",
+        "django": "Django",
+        "flask": "Flask",
+        "docker": "Docker",
+        "kubernetes": "Kubernetes",
+        "tableau": "Tableau",
+    }
+    lower = skill.lower()
+    return overrides.get(lower, " ".join(part.upper() if len(part) <= 3 else part.capitalize() for part in lower.split()))
 
 
 def _dedupe_requirements(requirements: list[JDRequirement]) -> list[JDRequirement]:

@@ -209,7 +209,6 @@ class ResumeRenderLatexResponse(BaseModel):
 class ResumeRenderPdfRequest(BaseModel):
     """POST /api/v1/resume/render-pdf"""
     session_id: str
-    latex_source: str
 
 
 class ResumeRenderPdfResponse(BaseModel):

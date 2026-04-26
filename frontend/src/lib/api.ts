@@ -15,6 +15,8 @@ import type {
   RenderLatexResponse,
   RenderPdfRequest,
   RenderPdfResponse,
+  PipelineGenerateRequest,
+  PipelineGenerateResponse,
 } from '../types/resume';
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000/api/v1';
@@ -57,23 +59,44 @@ function formatApiErrorMessage(body: string): string {
 async function request<T>(
   endpoint: string,
   options: RequestInit = {},
+  timeoutMs = 120000,
 ): Promise<T> {
   const url = `${API_BASE}${endpoint}`;
-  const res = await fetch(url, {
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-    ...options,
-  });
-
-  if (!res.ok) {
-    const body = await res.text();
-    const message = formatApiErrorMessage(body);
-    throw new ApiError(message, res.status);
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+  const externalSignal = options.signal;
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      controller.abort();
+    } else {
+      externalSignal.addEventListener('abort', () => controller.abort(), { once: true });
+    }
   }
+  try {
+    const res = await fetch(url, {
+      headers: {
+        'Content-Type': 'application/json',
+        ...options.headers,
+      },
+      ...options,
+      signal: controller.signal,
+    });
 
-  return res.json();
+    if (!res.ok) {
+      const body = await res.text();
+      const message = formatApiErrorMessage(body);
+      throw new ApiError(message, res.status);
+    }
+
+    return res.json();
+  } catch (error) {
+    if ((error as Error).name === 'AbortError') {
+      throw new ApiError('Request timed out. The backend did not finish in time.', 408);
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
 }
 
 // ─── Health ─────────────────────────────────────────────────────────────────
@@ -89,6 +112,13 @@ export async function analyzeJD(data: JDAnalyzeRequest): Promise<JDAnalyzeRespon
     method: 'POST',
     body: JSON.stringify(data),
   });
+}
+
+export async function generateResumePipeline(data: PipelineGenerateRequest): Promise<PipelineGenerateResponse> {
+  return request('/pipeline/generate', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  }, 180000);
 }
 
 // ─── Resume ─────────────────────────────────────────────────────────────────
@@ -124,7 +154,7 @@ export async function renderLatex(data: RenderLatexRequest): Promise<RenderLatex
 export async function renderPdf(data: RenderPdfRequest): Promise<RenderPdfResponse> {
   return request('/resume/render-pdf', {
     method: 'POST',
-    body: JSON.stringify(data),
+    body: JSON.stringify({ session_id: data.session_id }),
   });
 }
 

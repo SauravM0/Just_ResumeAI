@@ -11,7 +11,7 @@ import logging
 from app.schemas.jd import JDAnalyzeRequest, JDAnalyzeResponse
 from app.ai.orchestrators.jd_orchestrator import analyze_jd
 from app.ai.gemini_client import GeminiClientError
-from app.services.session_service import create_session
+from app.services.session_service import create_session, save_session
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/jd", tags=["job-description"])
@@ -34,6 +34,7 @@ async def analyze_job_description(request: JDAnalyzeRequest):
 
         # Store in session
         session.parsed_jd = parsed_jd
+        save_session(session)
 
         # Collect warnings
         warnings = list(parsed_jd.quality_warnings)

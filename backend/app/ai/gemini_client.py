@@ -76,6 +76,7 @@ class GeminiClient:
         self._model = settings.GEMINI_MODEL
         self._max_retries = settings.GEMINI_MAX_RETRIES
         self._temperature = settings.GEMINI_TEMPERATURE
+        self._timeout = settings.GEMINI_TIMEOUT_SECONDS
         self._retry_base_delay = settings.GEMINI_RETRY_BASE_DELAY_SECONDS
         self._retry_max_delay = settings.GEMINI_RETRY_MAX_DELAY_SECONDS
 
@@ -130,44 +131,73 @@ class GeminiClient:
         total_attempts = 1 + self._max_retries
         for attempt in range(total_attempts):
             try:
-                response = await self._client.aio.models.generate_content(
-                    model=self._model,
-                    contents=augmented_prompt if attempt == 0 else self._build_repair_prompt(augmented_prompt, raw_text, error_msg),
-                    config=config,
+                logger.info(
+                    "Calling Gemini model=%s attempt=%s/%s response_model=%s",
+                    self._model,
+                    attempt + 1,
+                    total_attempts,
+                    response_model.__name__,
+                )
+                response = await asyncio.wait_for(
+                    self._client.aio.models.generate_content(
+                        model=self._model,
+                        contents=augmented_prompt if attempt == 0 else self._build_repair_prompt(augmented_prompt, raw_text, error_msg),
+                        config=config,
+                    ),
+                    timeout=self._timeout,
                 )
                 raw_text = response.text
                 if not raw_text:
                     raise GeminiClientError("Gemini returned empty response")
 
                 # Parse and validate
-                parsed = json.loads(raw_text)
+                parsed = _parse_json_object(raw_text)
                 return response_model.model_validate(parsed)
 
             except (json.JSONDecodeError, ValidationError) as e:
                 error_msg = str(e)
                 logger.warning(
-                    f"Gemini response validation failed (attempt {attempt + 1}): {error_msg}"
+                    "Gemini response validation failed model=%s attempt=%s/%s error=%s raw=%s",
+                    self._model,
+                    attempt + 1,
+                    total_attempts,
+                    error_msg,
+                    (raw_text or "")[:1000],
                 )
                 if attempt >= self._max_retries:
                     raise GeminiClientError(
                         f"Failed to get valid response after {1 + self._max_retries} attempts: {error_msg}",
                         raw_response=raw_text,
-                    )
+                )
+                await asyncio.sleep(self._backoff_delay(attempt))
+            except asyncio.TimeoutError as e:
+                error_msg = f"Gemini call timed out after {self._timeout} seconds"
+                logger.warning(
+                    "Gemini timeout model=%s attempt=%s/%s timeout=%ss",
+                    self._model,
+                    attempt + 1,
+                    total_attempts,
+                    self._timeout,
+                )
+                if attempt >= self._max_retries:
+                    raise GeminiClientError(error_msg, raw_response=raw_text) from e
                 await asyncio.sleep(self._backoff_delay(attempt))
             except GeminiClientError:
                 raise
             except Exception as e:
                 if self._is_transient_error(e) and attempt < self._max_retries:
+                    is_quota = "429" in str(e).upper() or "RESOURCE_EXHAUSTED" in str(e).upper()
                     logger.warning(
-                        "Transient Gemini API error on attempt %s/%s: %s",
+                        "Transient Gemini API error on attempt %s/%s: %s (is_quota=%s)",
                         attempt + 1,
                         total_attempts,
                         e,
+                        is_quota
                     )
-                    await asyncio.sleep(self._backoff_delay(attempt))
+                    await asyncio.sleep(self._backoff_delay(attempt, is_quota))
                     continue
 
-                logger.error(f"Gemini API error: {e}")
+                logger.error("Gemini API error model=%s attempt=%s/%s: %s", self._model, attempt + 1, total_attempts, e)
                 raise GeminiClientError(f"Gemini API call failed: {e}")
 
         # Shouldn't reach here, but safety net
@@ -183,8 +213,20 @@ class GeminiClient:
             f"Original task:\n{original_prompt}"
         )
 
-    def _backoff_delay(self, attempt: int) -> float:
-        return min(self._retry_base_delay * (2 ** attempt), self._retry_max_delay)
+    def _backoff_delay(self, attempt: int, is_quota: bool = False) -> float:
+        """Calculate backoff delay. Quota errors wait significantly longer."""
+        base = self._retry_base_delay
+        if is_quota:
+            # For 429s, start with at least 5 seconds and double
+            base = max(base, 5.0)
+        
+        delay = min(base * (2 ** attempt), self._retry_max_delay)
+        
+        # Add a bit of jitter
+        import random
+        delay += random.uniform(0, 1.0)
+        
+        return delay
 
     def _is_transient_error(self, error: Exception) -> bool:
         message = str(error).upper()
@@ -202,6 +244,28 @@ class GeminiClient:
             "UNAVAILABLE",
         )
         return any(marker in message for marker in transient_markers)
+
+
+def _parse_json_object(raw_text: str) -> dict:
+    """Parse JSON mode output, tolerating fenced JSON or stray wrapper text."""
+    try:
+        parsed = json.loads(raw_text)
+        if isinstance(parsed, dict):
+            return parsed
+        raise json.JSONDecodeError("Top-level JSON is not an object", raw_text, 0)
+    except json.JSONDecodeError:
+        cleaned = raw_text.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.strip("`")
+            cleaned = cleaned.removeprefix("json").strip()
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            raise
+        parsed = json.loads(cleaned[start : end + 1])
+        if not isinstance(parsed, dict):
+            raise json.JSONDecodeError("Top-level JSON is not an object", cleaned, 0)
+        return parsed
 
 
 # Module-level singleton

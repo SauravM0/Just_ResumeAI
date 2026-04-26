@@ -156,7 +156,13 @@ async def generate_recommendation(
     filtered_experience = [e for e in profile.work_experience if e.id not in rejected_ids]
     filtered_projects = [p for p in profile.projects if p.id not in rejected_ids]
 
-    relevance_prompt = _build_relevance_prompt(filtered_experience, filtered_projects, parsed_jd, emphasis)
+    relevance_prompt = _build_relevance_prompt(
+        filtered_experience, 
+        filtered_projects, 
+        profile.skills,   # Pass skills here
+        parsed_jd, 
+        emphasis
+    )
     relevance = await client.generate_structured(
         prompt=relevance_prompt,
         response_model=_RelevanceResult,
@@ -215,6 +221,7 @@ async def generate_recommendation(
 def _build_relevance_prompt(
     experiences: list,
     projects: list,
+    profile_skills: list,  # Added this arg
     parsed_jd: ParsedJD,
     emphasis: str | None,
 ) -> str:
@@ -227,6 +234,8 @@ def _build_relevance_prompt(
         f"- ID: {p.id} | {p.name} | Tech: {', '.join(p.technologies[:5])}"
         for p in projects
     )
+    # Added skills to relevance matching
+    skills_text = ", ".join(s.name for s in profile_skills[:30])
     keywords = ", ".join(k.keyword for k in parsed_jd.keywords[:30])
 
     prompt = f"""Score the relevance of these profile items to the job description.
@@ -235,6 +244,8 @@ JOB: {parsed_jd.job_title} at {parsed_jd.company or 'Unknown Company'}
 SENIORITY: {parsed_jd.seniority.value}
 KEY REQUIREMENTS: {', '.join(parsed_jd.required_skills[:15])}
 JD KEYWORDS: {keywords}
+
+CANDIDATE SKILLS: {skills_text}
 
 EXPERIENCES:
 {exp_text or '(none)'}

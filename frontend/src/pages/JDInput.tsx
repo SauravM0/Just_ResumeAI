@@ -5,8 +5,9 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useMutation } from '@tanstack/react-query';
-import { analyzeJD } from '../lib/api';
+import { generateResumePipeline } from '../lib/api';
 import { getDefaultProfile } from '../lib/db';
+import { sanitizeProfile } from '../lib/profile';
 import { useAppStore } from '../store/useAppStore';
 import type { MasterProfile } from '../types/profile';
 
@@ -21,19 +22,29 @@ export default function JDInput() {
   const {
     setSessionId,
     setParsedJD,
+    setRecommendation,
+    setAtsScore,
+    setLatexSource,
+    setEligibility,
+    setPipelinePdf,
     setStep,
     addWarning,
     clearWarnings,
     setActiveProfile,
   } = useAppStore();
 
-  const analyzeMutation = useMutation({
-    mutationFn: analyzeJD,
+  const pipelineMutation = useMutation({
+    mutationFn: generateResumePipeline,
     onSuccess: (data) => {
       setSessionId(data.session_id);
       setParsedJD(data.parsed_jd);
+      setRecommendation(data.recommendation);
+      setAtsScore(data.ats_score);
+      setLatexSource(data.latex_source);
+      setEligibility(data.eligibility);
+      setPipelinePdf(data.pdf);
       data.warnings.forEach(addWarning);
-      setStep('jd-analysis');
+      setStep('resume-review');
       navigate('/review');
     },
   });
@@ -47,10 +58,17 @@ export default function JDInput() {
       return;
     }
 
-    setActiveProfile(savedProfile);
+    const normalizedProfile = sanitizeProfile(savedProfile);
+    setActiveProfile(normalizedProfile);
     setBlockingError(null);
     clearWarnings();
-    analyzeMutation.mutate({ raw_jd_text: rawJD });
+    pipelineMutation.mutate({
+      profile: normalizedProfile,
+      raw_jd_text: rawJD,
+      target_pages: 1,
+      allow_two_pages_for_senior: true,
+      generate_pdf: false,
+    });
   };
 
   const charCount = rawJD.length;
@@ -87,7 +105,7 @@ export default function JDInput() {
             onChange={(e) => setRawJD(e.target.value)}
             placeholder={`Paste the full job description here...\n\nInclude:\n- Job title and company\n- Requirements and qualifications\n- Responsibilities\n- Preferred skills\n- Experience requirements`}
             style={{ minHeight: '350px', fontFamily: 'var(--font-sans)' }}
-            disabled={analyzeMutation.isPending}
+            disabled={pipelineMutation.isPending}
           />
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <span className="form-hint">
@@ -101,13 +119,27 @@ export default function JDInput() {
           </div>
         </div>
 
-        {analyzeMutation.isError && (
+        {pipelineMutation.isPending && (
+          <div className="card" style={{ marginBottom: 'var(--space-md)' }}>
+            <div className="card-title" style={{ marginBottom: 'var(--space-sm)' }}>Generating Resume</div>
+            <div className="pipeline-steps">
+              {['Analyze JD', 'Check fit', 'Create resume', 'Score ATS', 'Render LaTeX'].map((label, index) => (
+                <div key={label} className={`pipeline-step ${index === 0 ? 'step-active' : ''}`}>
+                  <span>{index === 0 ? <span className="spinner" /> : index + 1}</span>
+                  <span>{label}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {pipelineMutation.isError && (
           <div className="warning-banner warning-error" style={{ marginBottom: 'var(--space-md)' }}>
             <span>❌</span>
             <div>
-              <strong>Analysis Failed</strong>
+              <strong>Resume Generation Failed</strong>
               <p style={{ margin: 0, marginTop: '4px', fontSize: '0.8rem' }}>
-                {(analyzeMutation.error as Error).message || 'Something went wrong. Please try again.'}
+                {(pipelineMutation.error as Error).message || 'Something went wrong. Please try again.'}
               </p>
             </div>
           </div>
@@ -126,21 +158,21 @@ export default function JDInput() {
         )}
 
         <div style={{ display: 'flex', gap: 'var(--space-md)', justifyContent: 'flex-end' }}>
-          <button className="btn btn-ghost" onClick={() => setRawJD('')} disabled={!rawJD || analyzeMutation.isPending}>
+          <button className="btn btn-ghost" onClick={() => setRawJD('')} disabled={!rawJD || pipelineMutation.isPending}>
             Clear
           </button>
           <button
             className="btn btn-primary btn-lg"
             onClick={handleAnalyze}
-            disabled={!isValid || analyzeMutation.isPending}
+            disabled={!isValid || pipelineMutation.isPending}
           >
-            {analyzeMutation.isPending ? (
+            {pipelineMutation.isPending ? (
               <>
                 <span className="spinner" />
-                Analyzing with AI...
+                Creating resume...
               </>
             ) : (
-              '🔍 Analyze Job Description'
+              'Analyze JD & Create Resume'
             )}
           </button>
         </div>

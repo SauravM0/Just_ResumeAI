@@ -29,12 +29,24 @@ function hasSavedProfile(profile: MasterProfile | null): profile is MasterProfil
   return Boolean(profile?.contact.full_name?.trim());
 }
 
+type ReviewSection = 'experience' | 'projects';
+
+function updateEntryBullet<T extends ResumeExperienceEntry | ResumeProjectEntry>(
+  entry: T,
+  bulletIndex: number,
+  updater: (bullet: ResumeBullet) => ResumeBullet,
+): T {
+  const bullets = [...entry.bullets];
+  bullets[bulletIndex] = updater(bullets[bulletIndex]);
+  return { ...entry, bullets };
+}
+
 export default function ResumeReview() {
   const navigate = useNavigate();
   const {
     sessionId, parsedJD, recommendation, setRecommendation,
     atsScore, setAtsScore, setLatexSource, setStep,
-    setActiveProfile, warnings,
+    setActiveProfile, warnings, eligibility, pipelinePdf,
   } = useAppStore();
 
   const [emphasis, setEmphasis] = useState('');
@@ -121,24 +133,6 @@ export default function ResumeReview() {
     },
   });
 
-  useEffect(() => {
-    if (
-      !recommendation &&
-      !recommendMutation.isPending &&
-      !blockingError &&
-      sessionId &&
-      parsedJD &&
-      resolvedProfile
-    ) {
-      recommendMutation.mutate({
-        session_id: sessionId,
-        profile: resolvedProfile,
-        emphasis: emphasis || undefined,
-        rejected_item_ids: [],
-      });
-    }
-  }, [sessionId, parsedJD, resolvedProfile, blockingError]); // eslint-disable-line react-hooks/exhaustive-deps
-
   // ── Handlers ───────────────────────────────────────────────────────────
   const getRejectedIds = useCallback((): string[] => {
     if (!recommendation) return [];
@@ -184,47 +178,46 @@ export default function ResumeReview() {
     });
   };
 
-  const updateBulletStatus = (expIndex: number, bulletIndex: number, status: BulletStatus, section: 'experience' | 'projects') => {
+  const updateBulletStatus = (expIndex: number, bulletIndex: number, status: BulletStatus, section: ReviewSection) => {
     if (!recommendation) return;
-    const rec = { ...recommendation };
-    const items = section === 'experience' ? [...rec.experience] : [...rec.projects];
-    const item = { ...items[expIndex] };
-    const bullets = [...item.bullets];
-    bullets[bulletIndex] = { ...bullets[bulletIndex], status };
-    item.bullets = bullets;
-    items[expIndex] = item as any;
-    if (section === 'experience') rec.experience = items as ResumeExperienceEntry[];
-    else rec.projects = items as ResumeProjectEntry[];
-    setRecommendation(rec);
-  };
-
-  const updateBulletText = (expIndex: number, bulletIndex: number, text: string, section: 'experience' | 'projects') => {
-    if (!recommendation) return;
-    const rec = { ...recommendation };
-    const items = section === 'experience' ? [...rec.experience] : [...rec.projects];
-    const item = { ...items[expIndex] };
-    const bullets = [...item.bullets];
-    bullets[bulletIndex] = { ...bullets[bulletIndex], text, status: 'edited' as BulletStatus };
-    item.bullets = bullets;
-    items[expIndex] = item as any;
-    if (section === 'experience') rec.experience = items as ResumeExperienceEntry[];
-    else rec.projects = items as ResumeProjectEntry[];
-    setRecommendation(rec);
-  };
-
-  const toggleIncluded = (index: number, section: 'experience' | 'projects') => {
-    if (!recommendation) return;
-    const rec = { ...recommendation };
     if (section === 'experience') {
-      const items = [...rec.experience];
-      items[index] = { ...items[index], included: !items[index].included };
-      rec.experience = items;
-    } else {
-      const items = [...rec.projects];
-      items[index] = { ...items[index], included: !items[index].included };
-      rec.projects = items;
+      const experience = [...recommendation.experience];
+      experience[expIndex] = updateEntryBullet(experience[expIndex], bulletIndex, (bullet) => ({ ...bullet, status }));
+      setRecommendation({ ...recommendation, experience });
+      return;
     }
-    setRecommendation(rec);
+
+    const projects = [...recommendation.projects];
+    projects[expIndex] = updateEntryBullet(projects[expIndex], bulletIndex, (bullet) => ({ ...bullet, status }));
+    setRecommendation({ ...recommendation, projects });
+  };
+
+  const updateBulletText = (expIndex: number, bulletIndex: number, text: string, section: ReviewSection) => {
+    if (!recommendation) return;
+    if (section === 'experience') {
+      const experience = [...recommendation.experience];
+      experience[expIndex] = updateEntryBullet(experience[expIndex], bulletIndex, (bullet) => ({ ...bullet, text, status: 'edited' }));
+      setRecommendation({ ...recommendation, experience });
+      return;
+    }
+
+    const projects = [...recommendation.projects];
+    projects[expIndex] = updateEntryBullet(projects[expIndex], bulletIndex, (bullet) => ({ ...bullet, text, status: 'edited' }));
+    setRecommendation({ ...recommendation, projects });
+  };
+
+  const toggleIncluded = (index: number, section: ReviewSection) => {
+    if (!recommendation) return;
+    if (section === 'experience') {
+      const experience = [...recommendation.experience];
+      experience[index] = { ...experience[index], included: !experience[index].included };
+      setRecommendation({ ...recommendation, experience });
+      return;
+    }
+
+    const projects = [...recommendation.projects];
+    projects[index] = { ...projects[index], included: !projects[index].included };
+    setRecommendation({ ...recommendation, projects });
   };
 
   // ── Loading state ──────────────────────────────────────────────────────
@@ -292,7 +285,9 @@ export default function ResumeReview() {
       <div className="empty-state">
         <div className="empty-icon">📄</div>
         <div className="empty-title">No recommendation available</div>
-        <div className="empty-description">Please analyze the job description again to generate a resume recommendation.</div>
+        <div className="empty-description">
+          Resume recommendations are kept only for the active browser session. Please analyze the job description again to regenerate the review content.
+        </div>
         <button className="btn btn-primary" onClick={() => navigate('/jd')}>Go to JD Input</button>
       </div>
     );
@@ -320,9 +315,35 @@ export default function ResumeReview() {
       </div>
 
       {/* Warnings */}
+      {eligibility?.status === 'hard_mismatch' && (
+        <div className="warning-banner warning-error" style={{ marginBottom: 'var(--space-md)' }}>
+          <span>⚠️</span>
+          <span>Resume can be generated, but this JD has hard eligibility mismatch.</span>
+        </div>
+      )}
+
+      {eligibility && (eligibility.blocking_issues.length > 0 || eligibility.warnings.length > 0) && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-sm)', marginBottom: 'var(--space-xl)' }}>
+          {[...eligibility.blocking_issues, ...eligibility.warnings].map((w, i) => (
+            <div key={i} className={eligibility.status === 'hard_mismatch' ? 'warning-banner warning-error' : 'warning-banner warning-warn'}>
+              <span>⚠️</span><span>{w}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {pipelinePdf?.requested && !pipelinePdf.compile_success && (
+        <div className="warning-banner warning-warn" style={{ marginBottom: 'var(--space-xl)' }}>
+          <span>⚠️</span>
+          <span>
+            LaTeX generated successfully, PDF compile failed: {pipelinePdf.compile_errors.join('; ') || 'Unknown PDF compilation error.'}
+          </span>
+        </div>
+      )}
+
       {(rec.warnings.length > 0 || warnings.length > 0) && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-sm)', marginBottom: 'var(--space-xl)' }}>
-          {[...warnings, ...rec.warnings].map((w, i) => (
+          {Array.from(new Set([...warnings, ...rec.warnings])).map((w, i) => (
             <div key={i} className="warning-banner warning-warn">
               <span>⚠️</span><span>{w}</span>
             </div>

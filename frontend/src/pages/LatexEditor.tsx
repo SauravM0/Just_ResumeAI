@@ -39,7 +39,6 @@ export default function LatexEditor() {
     if (!sessionId || !latexSource) return;
     compileMutation.mutate({
       session_id: sessionId,
-      latex_source: latexSource,
     });
   };
 
@@ -53,6 +52,17 @@ export default function LatexEditor() {
     if (latexSource) {
       navigator.clipboard.writeText(latexSource);
     }
+  };
+
+  const handleDownloadLatex = () => {
+    if (!latexSource) return;
+    const blob = new Blob([latexSource], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'resume.tex';
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   if (!sessionId || !latexSource) {
@@ -77,6 +87,7 @@ export default function LatexEditor() {
         </div>
         <div style={{ display: 'flex', gap: 'var(--space-sm)' }}>
           <button className="btn btn-ghost" onClick={handleCopyLatex}>📋 Copy LaTeX</button>
+          <button className="btn btn-secondary" onClick={handleDownloadLatex}>💾 Download .tex</button>
           <button className="btn btn-secondary" onClick={handleCompile} disabled={compileMutation.isPending}>
             {compileMutation.isPending ? <span className="spinner" /> : '⚡'} Compile PDF
           </button>
@@ -125,6 +136,9 @@ export default function LatexEditor() {
             onChange={(e) => setLatexSource(e.target.value)}
             spellCheck={false}
           />
+          <p style={{ marginTop: 'var(--space-sm)', color: 'var(--text-tertiary)', fontSize: '0.8rem' }}>
+            PDF compilation uses the last server-rendered LaTeX stored for this session. Local edits in this textbox are not compiled in this phase.
+          </p>
         </div>
 
         <div className="split-pane-right">

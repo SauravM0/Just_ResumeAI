@@ -3,12 +3,15 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 from app.api.v1.router import api_router
+from app.config import get_settings
+
+settings = get_settings()
 
 app = FastAPI(title="JustResume AI API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:5174", "http://127.0.0.1:5173", "http://127.0.0.1:5174"],
+    allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
