@@ -8,6 +8,7 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import type { ParsedJD } from '../types/jd';
+import type { ATSAlignmentReport } from '../types/alignment';
 import type { ResumeRecommendation, ATSScore, EligibilityResult, PipelinePdfResult } from '../types/resume';
 import type { MasterProfile } from '../types/profile';
 
@@ -40,6 +41,9 @@ interface AppState {
   // ATS score (set after validation)
   atsScore: ATSScore | null;
   setAtsScore: (score: ATSScore) => void;
+
+  alignmentReport: ATSAlignmentReport | null;
+  setAlignmentReport: (report: ATSAlignmentReport | null) => void;
 
   // LaTeX source (set after rendering)
   latexSource: string | null;
@@ -82,6 +86,9 @@ export const useAppStore = create<AppState>()(
       atsScore: null,
       setAtsScore: (score) => set({ atsScore: score }),
 
+      alignmentReport: null,
+      setAlignmentReport: (report) => set({ alignmentReport: report }),
+
       latexSource: null,
       setLatexSource: (src) => set({ latexSource: src }),
 
@@ -103,6 +110,7 @@ export const useAppStore = create<AppState>()(
           parsedJD: null,
           recommendation: null,
           atsScore: null,
+          alignmentReport: null,
           latexSource: null,
           eligibility: null,
           pipelinePdf: null,
@@ -118,6 +126,10 @@ export const useAppStore = create<AppState>()(
         currentStep: state.currentStep,
         sessionId: state.sessionId,
         parsedJD: state.parsedJD,
+        recommendation: state.recommendation,
+        atsScore: state.atsScore,
+        alignmentReport: state.alignmentReport,
+        latexSource: state.latexSource,
         eligibility: state.eligibility,
         pipelinePdf: state.pipelinePdf,
         warnings: state.warnings,

@@ -8,30 +8,63 @@ import { useMutation } from '@tanstack/react-query';
 import { renderPdf } from '../lib/api';
 import { useAppStore } from '../store/useAppStore';
 
+function toBackendUrl(path: string): string {
+  const baseUrl = import.meta.env.VITE_API_BASE?.replace('/api/v1', '') || 'http://localhost:8000';
+  return `${baseUrl}${path}`;
+}
+
 export default function LatexEditor() {
   const navigate = useNavigate();
-  const { sessionId, latexSource, setLatexSource } = useAppStore();
-  const [pdfUrl, setPdfUrl] = useState<string | null>(null);
+  const { sessionId, latexSource, setLatexSource, pipelinePdf, setPipelinePdf } = useAppStore();
+  const [pdfUrl, setPdfUrl] = useState<string | null>(
+    pipelinePdf?.compile_success && pipelinePdf.pdf_url
+      ? `${toBackendUrl(pipelinePdf.pdf_url)}?t=${Date.now()}`
+      : null,
+  );
   const [compileErrors, setCompileErrors] = useState<string[]>([]);
 
   const compileMutation = useMutation({
     mutationFn: renderPdf,
     onSuccess: (data) => {
       if (data.compile_success) {
-        // Build full URL from relative path
-        const baseUrl = import.meta.env.VITE_API_BASE?.replace('/api/v1', '') || 'http://localhost:8000';
-        setPdfUrl(`${baseUrl}${data.pdf_url}`);
+        setPdfUrl(`${toBackendUrl(data.pdf_url)}?t=${Date.now()}`);
+        setPipelinePdf({
+          requested: true,
+          compile_success: true,
+          pdf_url: data.pdf_url,
+          compile_errors: [],
+          compile_warnings: data.compile_warnings || [],
+          generated_tex_path: data.generated_tex_path,
+          pdflatex_excerpt: data.pdflatex_excerpt,
+          line_number: data.line_number,
+        });
         setCompileErrors([]);
       } else {
         setPdfUrl(null);
         setCompileErrors(data.compile_errors);
+        setPipelinePdf({
+          requested: true,
+          compile_success: false,
+          pdf_url: undefined,
+          compile_errors: data.compile_errors || [],
+          compile_warnings: data.compile_warnings || [],
+          generated_tex_path: data.generated_tex_path,
+          pdflatex_excerpt: data.pdflatex_excerpt,
+          line_number: data.line_number,
+        });
       }
     },
     onError: (error) => {
       setPdfUrl(null);
-      setCompileErrors([
-        error instanceof Error ? error.message : 'PDF compilation failed.',
-      ]);
+      const message = error instanceof Error ? error.message : 'PDF compilation failed.';
+      setCompileErrors([message]);
+      setPipelinePdf({
+        requested: true,
+        compile_success: false,
+        pdf_url: undefined,
+        compile_errors: [message],
+        compile_warnings: [],
+      });
     },
   });
 
@@ -82,7 +115,7 @@ export default function LatexEditor() {
         <div>
           <h1 className="page-title">LaTeX Editor & PDF Preview</h1>
           <p className="page-subtitle">
-            Review the generated LaTeX source. Compile to PDF when ready.
+            Review the generated LaTeX source. Your approved PDF is shown on the right when available.
           </p>
         </div>
         <div style={{ display: 'flex', gap: 'var(--space-sm)' }}>
@@ -160,7 +193,7 @@ export default function LatexEditor() {
               <div className="empty-state" style={{ padding: 'var(--space-xl)' }}>
                 <div className="empty-icon" style={{ fontSize: '2rem' }}>📄</div>
                 <div className="empty-title" style={{ color: '#666' }}>No PDF yet</div>
-                <div className="empty-description" style={{ color: '#999' }}>Click "Compile PDF" to generate the preview.</div>
+                <div className="empty-description" style={{ color: '#999' }}>Click "Compile PDF" to regenerate the preview after editing LaTeX.</div>
               </div>
             )}
           </div>

@@ -88,11 +88,13 @@
     \resumeSubheading
       {<< exp.title >>}{<< exp.date_range >>}
       {<< exp.company_line >>}{}
+      <% if exp.bullets %>
       \resumeItemListStart
         <% for bullet in exp.bullets %>
         \resumeItem{<< bullet >>}
         <% endfor %>
       \resumeItemListEnd
+      <% endif %>
     <% endfor %>
   \resumeSubHeadingListEnd
 <% endif %>
@@ -103,11 +105,13 @@
       <% for project in projects %>
       \resumeProjectHeading
           {\textbf{<< project.name >>}<% if project.technologies %> $|$ \emph{<< project.technologies >>}<% endif %>}{}
+          <% if project.bullets %>
           \resumeItemListStart
             <% for bullet in project.bullets %>
             \resumeItem{<< bullet >>}
             <% endfor %>
           \resumeItemListEnd
+          <% endif %>
       <% endfor %>
     \resumeSubHeadingListEnd
 <% endif %>

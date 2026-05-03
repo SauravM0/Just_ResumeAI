@@ -207,7 +207,7 @@ def _profile_batches(profile: MasterProfile) -> set[int]:
 
 
 def _has_specific_batch_constraint(normalized_jd: str) -> bool:
-    return bool(re.search(r"\b(specific|only|eligible|must)\b.{0,40}\bbatch\b|\bbatch\b.{0,40}\b(only|eligible|must)\b", normalized_jd))
+    return bool(re.search(r"\b(specific|only|eligible|must)\b.{0,40}\bbatches?\b|\bbatches?\b.{0,40}\b(only|eligible|must)\b", normalized_jd))
 
 
 def _minimum_marks_or_cgpa(normalized_jd: str) -> tuple[float, str] | None:

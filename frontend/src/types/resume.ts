@@ -4,6 +4,7 @@
 
 import type { MasterProfile } from './profile';
 import type { ParsedJD } from './jd';
+import type { ATSAlignmentReport } from './alignment';
 
 export type BulletStatus = 'pending' | 'accepted' | 'edited' | 'locked' | 'rejected';
 
@@ -106,17 +107,41 @@ export interface KeywordScore {
   details: KeywordMatch[];
 }
 
+export interface SkillScore {
+  required_total: number;
+  required_matched: number;
+  required_coverage_percent: number;
+  preferred_total: number;
+  preferred_matched: number;
+  preferred_coverage_percent: number;
+}
+
 export interface ReadabilityScore {
   score: number;
   avg_bullet_length: number;
   issues: string[];
 }
 
+export interface SectionScore {
+  score: number;
+  missing_sections: string[];
+  has_contact: boolean;
+  has_summary: boolean;
+  has_experience: boolean;
+  has_skills: boolean;
+  has_education: boolean;
+}
+
 export interface ATSScore {
   overall_score: number;
   keyword_score: KeywordScore;
+  skill_score: SkillScore;
   readability_score: ReadabilityScore;
   format_score: number;
+  section_score: SectionScore;
+  responsibility_score: number;
+  title_alignment_score: number;
+  missing_keywords: string[];
   warnings: string[];
   recommendations: string[];
 }
@@ -127,17 +152,20 @@ export interface ResumeRecommendRequest {
   session_id: string;
   profile: MasterProfile;
   emphasis?: string;
+  additional_alignment_text?: string;
   rejected_item_ids: string[];
 }
 
 export interface ResumeRecommendResponse {
   recommendation: ResumeRecommendation;
+  alignment_report?: ATSAlignmentReport;
 }
 
 export interface ResumeRegenerateRequest {
   session_id: string;
   profile: MasterProfile;
   emphasis?: string;
+  additional_alignment_text?: string;
   locked_bullet_ids: string[];
   rejected_item_ids: string[];
 }
@@ -166,11 +194,30 @@ export interface RenderPdfRequest {
   session_id: string;
 }
 
+export interface ApproveGeneratePdfRequest {
+  session_id: string;
+  recommendation: ResumeRecommendation;
+}
+
 export interface RenderPdfResponse {
   pdf_url: string;
   compile_success: boolean;
   compile_errors: string[];
   compile_warnings: string[];
+  generated_tex_path?: string;
+  pdflatex_excerpt?: string;
+  line_number?: number;
+}
+
+export interface ApproveGeneratePdfResponse {
+  latex_source: string;
+  pdf_url: string;
+  compile_success: boolean;
+  compile_errors: string[];
+  compile_warnings: string[];
+  generated_tex_path?: string;
+  pdflatex_excerpt?: string;
+  line_number?: number;
 }
 
 export type EligibilityStatus = 'match' | 'partial_match' | 'hard_mismatch';
@@ -196,6 +243,7 @@ export interface PipelineGenerateRequest {
   allow_two_pages_for_senior?: boolean;
   generate_pdf?: boolean;
   emphasis?: string;
+  additional_alignment_text?: string;
 }
 
 export interface PipelinePdfResult {
@@ -204,6 +252,9 @@ export interface PipelinePdfResult {
   pdf_url?: string;
   compile_errors: string[];
   compile_warnings: string[];
+  generated_tex_path?: string;
+  pdflatex_excerpt?: string;
+  line_number?: number;
 }
 
 export interface PipelineGenerateResponse {
@@ -212,6 +263,7 @@ export interface PipelineGenerateResponse {
   eligibility: EligibilityResult;
   recommendation: ResumeRecommendation;
   ats_score: ATSScore;
+  alignment_report: ATSAlignmentReport;
   latex_source: string;
   pdf: PipelinePdfResult;
   steps: PipelineStepStatus[];

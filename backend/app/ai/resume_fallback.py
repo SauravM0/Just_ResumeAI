@@ -9,6 +9,7 @@ from collections import Counter
 from datetime import date
 
 from app.domain.rules import MAX_EXPERIENCES, MAX_PROJECTS, MAX_BULLETS_PER_EXPERIENCE, MAX_SUMMARY_WORDS
+from app.schemas.ats_planner import ATSKeywordPlannerOutput
 from app.schemas.jd import ParsedJD
 from app.schemas.profile import MasterProfile, Project, WorkExperience
 from app.schemas.resume import (
@@ -64,12 +65,15 @@ def generate_recommendation_without_ai(
     emphasis: str | None = None,
     rejected_ids: list[str] | None = None,
     locked_bullets: dict[str, str] | None = None,
+    target_pages: int = 1,
+    additional_alignment_text: str | None = None,
+    ats_plan: ATSKeywordPlannerOutput | None = None,
 ) -> ResumeRecommendation:
     """Build a deterministic ResumeRecommendation without calling Gemini."""
     rejected_ids = rejected_ids or []
     locked_bullets = locked_bullets or {}
 
-    jd_terms = _build_jd_terms(parsed_jd, emphasis)
+    jd_terms = _build_jd_terms(parsed_jd, " ".join([emphasis or "", additional_alignment_text or ""]), ats_plan)
     profile_skill_terms = normalize_terms(" ".join(skill.name for skill in profile.skills))
 
     ranked_experiences = rank_experiences(profile, jd_terms, profile_skill_terms, rejected_ids)
@@ -78,17 +82,20 @@ def generate_recommendation_without_ai(
     selected_experiences = ranked_experiences[:MAX_EXPERIENCES]
     selected_projects = ranked_projects[:MAX_PROJECTS]
 
-    skill_groups = _build_skill_groups(profile, jd_terms)
+    skill_groups = _build_skill_groups(profile, jd_terms, ats_plan)
     strongest_skills = _top_skill_names(skill_groups)
 
     experience_entries = [
         build_experience_entry(exp, score, matched_keywords, jd_terms, locked_bullets)
         for exp, score, matched_keywords, _ in selected_experiences
     ]
+    experience_entries = [e for e in experience_entries if len(e.bullets) >= 2]
+
     project_entries = [
         build_project_entry(project, score, matched_keywords, jd_terms, locked_bullets)
         for project, score, matched_keywords, _ in selected_projects
     ]
+    project_entries = [p for p in project_entries if len(p.bullets) >= 2]
 
     contact = ResumeContactInfo(
         full_name=profile.contact.full_name,
@@ -125,13 +132,15 @@ def generate_recommendation_without_ai(
         for cert in profile.certifications
     ]
 
-    target_title = parsed_jd.job_title or _fallback_target_title(profile)
+    raw_target_title = ats_plan.target_resume_title if ats_plan else _fallback_target_title(profile, parsed_jd, "")
+    target_title = _clean_resume_title(raw_target_title)
     summary = build_fallback_summary(
         profile=profile,
         target_title=target_title,
         strongest_skills=strongest_skills,
         selected_experiences=[exp for exp, _, _, _ in selected_experiences],
         selected_projects=[project for project, _, _, _ in selected_projects],
+        ats_plan=ats_plan,
     )
 
     warnings = [_FALLBACK_WARNING]
@@ -201,16 +210,24 @@ def build_fallback_summary(
     strongest_skills: list[str],
     selected_experiences: list[WorkExperience],
     selected_projects: list[Project],
+    ats_plan: ATSKeywordPlannerOutput | None = None,
 ) -> str:
     """Create a short deterministic summary using only profile and selection data."""
     years = _infer_years_of_experience(profile.work_experience)
     years_text = f" with {years}+ years of experience" if years and years > 0 else ""
 
     themes = _experience_themes(selected_experiences, selected_projects)
-    parts = [f"{target_title}{years_text}."]
+    clean_title = _clean_resume_title(target_title)
+    parts = [f"{clean_title}{years_text}."]
 
-    if strongest_skills:
-        parts.append(f"Core strengths include {', '.join(strongest_skills[:4])}.")
+    priority_keywords = ats_plan.priority_keywords[:8] if ats_plan else []
+    if priority_keywords:
+        keyword_text = ", ".join(priority_keywords[:5])
+        parts.append(f"Skilled in {keyword_text}.")
+
+    planned_skills = ats_plan.must_include_skills[:5] if ats_plan else strongest_skills[:4]
+    if planned_skills and len(priority_keywords) < 5:
+        parts.append(f"Core strengths include {', '.join(planned_skills[:3])}.")
     if themes:
         parts.append(f"Background includes {', '.join(themes[:3])}.")
 
@@ -221,7 +238,7 @@ def build_fallback_summary(
 
     if profile.summary:
         return _trim_words(profile.summary.strip(), MAX_SUMMARY_WORDS)
-    return _trim_words(f"{target_title}{years_text}.", MAX_SUMMARY_WORDS)
+    return _trim_words(f"{clean_title}{years_text}.", MAX_SUMMARY_WORDS)
 
 
 def build_experience_entry(
@@ -281,7 +298,11 @@ def build_project_entry(
     )
 
 
-def _build_jd_terms(parsed_jd: ParsedJD, emphasis: str | None) -> set[str]:
+def _build_jd_terms(
+    parsed_jd: ParsedJD,
+    emphasis: str | None,
+    ats_plan: ATSKeywordPlannerOutput | None = None,
+) -> set[str]:
     """Build normalized JD term set from structured JD fields and optional emphasis."""
     parts = [
         parsed_jd.job_title,
@@ -289,6 +310,17 @@ def _build_jd_terms(parsed_jd: ParsedJD, emphasis: str | None) -> set[str]:
         " ".join(parsed_jd.preferred_skills),
         " ".join(keyword.keyword for keyword in parsed_jd.keywords),
         " ".join(parsed_jd.responsibilities),
+        " ".join(parsed_jd.tools_platforms),
+        " ".join(parsed_jd.programming_languages),
+        " ".join(parsed_jd.frameworks),
+        " ".join(parsed_jd.databases),
+        " ".join(parsed_jd.cloud_devops_tools),
+        " ".join(parsed_jd.domain_platform_terms),
+        " ".join(parsed_jd.deployment_environment_terms),
+        " ".join(parsed_jd.mobile_platform_terms),
+        " ".join(parsed_jd.important_exact_phrases),
+        " ".join(ats_plan.priority_keywords if ats_plan else []),
+        " ".join(ats_plan.must_include_responsibilities if ats_plan else []),
         emphasis or "",
     ]
     return normalize_terms(" ".join(part for part in parts if part))
@@ -401,7 +433,11 @@ def _build_ranked_bullets(
     return bullets
 
 
-def _build_skill_groups(profile: MasterProfile, jd_terms: set[str]) -> list[ResumeSkillGroup]:
+def _build_skill_groups(
+    profile: MasterProfile,
+    jd_terms: set[str],
+    ats_plan: ATSKeywordPlannerOutput | None = None,
+) -> list[ResumeSkillGroup]:
     """Group skills by category, ordering JD-relevant skills first inside each group."""
     grouped: dict[str, list[tuple[float, int, str]]] = {}
     for index, skill in enumerate(profile.skills):
@@ -413,6 +449,15 @@ def _build_skill_groups(profile: MasterProfile, jd_terms: set[str]) -> list[Resu
     for category, items in grouped.items():
         ordered = [name for _, _, name in sorted(items, key=lambda item: (-item[0], item[1]))]
         groups.append(ResumeSkillGroup(category=category, skills=ordered))
+
+    if ats_plan:
+        technical_skills = _dedupe_strings([*ats_plan.must_include_skills, *ats_plan.must_include_tools_platforms])
+        if technical_skills:
+            existing = next((group for group in groups if group.category.lower() in {"technical skills", "programming languages"}), None)
+            if existing:
+                existing.skills = _dedupe_strings([*technical_skills, *existing.skills])
+            else:
+                groups.insert(0, ResumeSkillGroup(category="Technical Skills", skills=technical_skills))
 
     groups.sort(key=lambda group: (-_group_skill_score(group, jd_terms), group.category.lower()))
     return groups
@@ -432,6 +477,19 @@ def _top_skill_names(skill_groups: list[ResumeSkillGroup]) -> list[str]:
             if len(names) >= 4:
                 return names
     return names
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for value in values:
+        cleaned = " ".join(str(value).split()).strip()
+        key = cleaned.casefold()
+        if not cleaned or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(cleaned)
+    return deduped
 
 
 def _experience_themes(
@@ -480,7 +538,13 @@ def _parse_partial_date(value: str | None) -> date | None:
     return None
 
 
-def _fallback_target_title(profile: MasterProfile) -> str:
+def _fallback_target_title(
+    profile: MasterProfile,
+    parsed_jd: ParsedJD,
+    role_family: str,
+) -> str:
+    if parsed_jd.job_title:
+        return parsed_jd.job_title
     if profile.work_experience:
         return profile.work_experience[0].title
     if profile.projects:
@@ -514,3 +578,9 @@ def _locked_bullet_slots(
         except ValueError:
             continue
     return slots
+
+
+def _clean_resume_title(title: str) -> str:
+    """Clean resume title by removing labels like 'Designation:'."""
+    cleaned = re.sub(r"^\s*(designation|job\s*title|title|role)\s*:\s*", "", title, flags=re.IGNORECASE)
+    return cleaned.strip(" :-\t")

@@ -71,6 +71,16 @@ class ParsedJD(BaseModel):
     keywords: list[JDKeyword] = Field(default_factory=list)
     required_skills: list[str] = Field(default_factory=list)
     preferred_skills: list[str] = Field(default_factory=list)
+    tools_platforms: list[str] = Field(default_factory=list)
+    programming_languages: list[str] = Field(default_factory=list)
+    frameworks: list[str] = Field(default_factory=list)
+    databases: list[str] = Field(default_factory=list)
+    cloud_devops_tools: list[str] = Field(default_factory=list)
+    domain_platform_terms: list[str] = Field(default_factory=list)
+    deployment_environment_terms: list[str] = Field(default_factory=list)
+    mobile_platform_terms: list[str] = Field(default_factory=list)
+    soft_skills: list[str] = Field(default_factory=list)
+    important_exact_phrases: list[str] = Field(default_factory=list)
     required_experience_years: Optional[int] = None
     required_education: Optional[str] = None
 

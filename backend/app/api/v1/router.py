@@ -4,7 +4,7 @@ API v1 router — aggregates all endpoint routers.
 
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import health, jd, resume, cover_letter, pipeline
+from app.api.v1.endpoints import cover_letter, health, jd, pipeline, resume
 
 api_router = APIRouter(prefix="/api/v1")
 

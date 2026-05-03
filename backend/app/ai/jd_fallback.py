@@ -8,6 +8,7 @@ import re
 from collections import Counter
 
 from app.schemas.jd import JDKeyword, JDQualityLevel, JDRequirement, ParsedJD, SeniorityLevel
+from app.services.jd_ats_extraction import enrich_parsed_jd_for_ats
 
 COMMON_SKILLS = {
     "python",
@@ -46,6 +47,25 @@ COMMON_SKILLS = {
     "leadership",
     "agile",
     "scrum",
+    "pl/sql",
+    "oracle db",
+    "oracle database",
+    "microservices",
+    "ui/ux",
+    "devops",
+    "jenkins",
+    "obdx",
+    "oracle banking digital experience",
+    "cemli",
+    "cemlis",
+    "development workbench",
+    "extensibility",
+    "ios",
+    "android",
+    "mobile app development",
+    "uk open banking",
+    "psd2",
+    "open banking apis",
 }
 
 SENIORITY_PATTERNS: list[tuple[str, SeniorityLevel]] = [
@@ -86,6 +106,8 @@ RESPONSIBILITY_HINTS = (
     "what you will do",
     "duties",
     "role overview",
+    "role description",
+    "description",
 )
 
 PREFERRED_SECTION_HINTS = (
@@ -154,7 +176,7 @@ def analyze_jd_without_ai(raw_text: str) -> ParsedJD:
         "AI provider was temporarily unavailable, so this job description was parsed with a local fallback."
     )
 
-    return ParsedJD(
+    parsed = ParsedJD(
         job_title=title,
         company=company,
         location=location,
@@ -172,6 +194,7 @@ def analyze_jd_without_ai(raw_text: str) -> ParsedJD:
         quality_warnings=quality_warnings,
         raw_text=raw_text,
     )
+    return enrich_parsed_jd_for_ats(parsed, raw_text)
 
 
 def _extract_company(lines: list[str], raw_text: str) -> str | None:
@@ -309,7 +332,7 @@ def _extract_requirements(lines: list[str]) -> list[JDRequirement]:
             continue
 
         text = line.lstrip("-*\u2022 ").strip()
-        if len(text) < 8:
+        if len(text) < 3:
             continue
 
         is_required = _classify_requirement_item(text, section_mode)
@@ -540,6 +563,25 @@ def _normalize_skill_name(skill: str) -> str:
         "docker": "Docker",
         "kubernetes": "Kubernetes",
         "tableau": "Tableau",
+        "pl/sql": "PL/SQL",
+        "oracle db": "Oracle DB",
+        "oracle database": "Oracle DB",
+        "microservices": "Microservices",
+        "ui/ux": "UI/UX",
+        "devops": "DevOps",
+        "jenkins": "Jenkins",
+        "obdx": "OBDX",
+        "oracle banking digital experience": "Oracle Banking Digital Experience",
+        "cemli": "CEMLI",
+        "cemlis": "CEMLIs",
+        "development workbench": "Development Workbench",
+        "extensibility": "Extensibility",
+        "ios": "iOS",
+        "android": "Android",
+        "mobile app development": "Mobile App development",
+        "uk open banking": "UK Open Banking",
+        "psd2": "PSD2",
+        "open banking apis": "Open Banking APIs",
     }
     lower = skill.lower()
     return overrides.get(lower, " ".join(part.upper() if len(part) <= 3 else part.capitalize() for part in lower.split()))

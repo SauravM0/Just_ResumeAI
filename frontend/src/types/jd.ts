@@ -32,6 +32,16 @@ export interface ParsedJD {
   keywords: JDKeyword[];
   required_skills: string[];
   preferred_skills: string[];
+  tools_platforms: string[];
+  programming_languages: string[];
+  frameworks: string[];
+  databases: string[];
+  cloud_devops_tools: string[];
+  domain_platform_terms: string[];
+  deployment_environment_terms: string[];
+  mobile_platform_terms: string[];
+  soft_skills: string[];
+  important_exact_phrases: string[];
   required_experience_years?: number;
   required_education?: string;
   quality: JDQualityLevel;

@@ -20,6 +20,8 @@ from app.services.pdf_compile_service import PDFCompileError, compile_pdf
 from app.services.latex_render_service import render_latex
 from app.services.session_service import create_session, get_session, save_session
 from app.services.eligibility_service import check_eligibility
+from app.services.ats_keyword_planner import build_ats_keyword_plan
+from app.services.scoring_service import compute_ats_score
 
 
 @pytest.fixture()
@@ -92,6 +94,69 @@ def _sample_profile() -> MasterProfile:
                 description="FastAPI service for parsing resumes and extracting skills.",
                 technologies=["Python", "FastAPI"],
                 bullets=["Developed a parser service with Python and FastAPI."],
+            )
+        ],
+        certifications=[],
+    )
+
+
+def _obdx_profile() -> MasterProfile:
+    return MasterProfile(
+        id="obdx-profile-1",
+        contact=ContactInfo(
+            full_name="John Developer",
+            email="john.dev@example.com",
+            phone="555-0202",
+            linkedin_url="https://linkedin.com/in/johndev",
+        ),
+        summary="Senior OBDX Developer with expertise in Oracle Banking Digital Experience.",
+        work_experience=[
+            WorkExperience(
+                id="exp-1",
+                company="TechServe Inc",
+                title="OBDX Developer",
+                start_date="2021-06",
+                end_date="2024-06",
+                description="OBDX development and deployment for banking clients.",
+                bullets=[
+                    "Developed CEMLIs for OBDX implementation",
+                    "Configured OBDX and deployed to non-production environments",
+                    "Worked on UI/UX enhancements using Development Workbench",
+                ],
+                tags=["obdx", "oracle", "banking"],
+            ),
+            WorkExperience(
+                id="exp-2",
+                company="BankTech Solutions",
+                title="Java Developer",
+                start_date="2019-01",
+                end_date="2021-05",
+                description="Java and Microservices development for financial services.",
+                bullets=[
+                    "Built microservices using Spring Boot",
+                    "Integrated with UK Open Banking APIs",
+                ],
+                tags=["java", "microservices", "api"],
+            ),
+        ],
+        education=[
+            Education(id="edu-1", institution="Tech University", degree="BE", field_of_study="Computer Science")
+        ],
+        skills=[
+            Skill(name="PL/SQL", category="Languages"),
+            Skill(name="Java", category="Languages"),
+            Skill(name="OBDX", category="Platforms"),
+            Skill(name="Oracle Database", category="Databases"),
+            Skill(name="Jenkins", category="DevOps"),
+            Skill(name="Git", category="Tools"),
+        ],
+        projects=[
+            Project(
+                id="proj-1",
+                name="OBDX Mobile App",
+                description="Developed mobile banking app for iOS and Android.",
+                technologies=["iOS", "Android", "Java"],
+                bullets=["Developed mobile apps for iOS and Android platforms"],
             )
         ],
         certifications=[],
@@ -574,3 +639,104 @@ def test_fallback_mode_does_not_introduce_fake_metrics():
     )
 
     assert not re.search(r"\b\d+%|\$\d+|\b\d+x\b", generated_text, re.IGNORECASE)
+
+
+def test_obdx_jd_regression_full_pipeline():
+    """Regression test for exact OBDX JD that previously had issues.
+    
+    Tests the full pipeline: JD parsing -> Resume generation -> LaTeX render -> PDF compile.
+    """
+    obdx_jd_raw = """Designation : OBDX DEVELOPER :
+
+Skills:
+PL/SQL
+Java/Microservices
+UI/UX development
+DevOps
+OBDX hands on experience
+
+Role Description:
+Installation of OBDX
+Development of CEMLIs for OBDX
+Troubleshooting of issues
+Deployment to non-production environments
+Should have knowledge of DevOps process, GIT, Jenkins
+Should have working knowledge on UI/UX development and using Development Workbench
+Should have extensive knowledge on Java/Microservices development w.r.t OBDX and using extensibility
+Should have hands-on experience with Mobile App development for iOS/Android
+Working knowledge of UK Open Banking will be an advantage
+
+Location: Bangalore/Chennai/Mumbai/Pune"""
+
+    parsed_jd = analyze_jd_without_ai(obdx_jd_raw)
+
+    assert parsed_jd.job_title == "OBDX Developer"
+    assert "pl/sql" in {s.casefold() for s in parsed_jd.required_skills}
+
+    java_or_microservices = {s.casefold() for s in parsed_jd.required_skills}
+    assert "java" in java_or_microservices or "microservices" in java_or_microservices
+
+    ui_ux_skills = {s.casefold() for s in parsed_jd.required_skills}
+    assert "ui/ux" in ui_ux_skills or any("ui" in s.lower() for s in parsed_jd.required_skills)
+
+    assert "devops" in {s.casefold() for s in parsed_jd.required_skills}
+
+    git_jenkins = {s.casefold() for s in parsed_jd.cloud_devops_tools}
+    assert "git" in git_jenkins or "jenkins" in git_jenkins
+
+    cemli_skills = {s.casefold() for s in parsed_jd.required_skills}
+    assert "cemli" in cemli_skills or "cemlis" in cemli_skills
+
+    dev_tools = {s.casefold() for s in parsed_jd.tools_platforms}
+    assert "development workbench" in dev_tools
+
+    mobile_terms = {s.casefold() for s in parsed_jd.mobile_platform_terms}
+    assert "ios" in mobile_terms or "android" in mobile_terms
+
+    profile = _obdx_profile()
+    ats_plan = build_ats_keyword_plan(parsed_jd, profile)
+    recommendation = generate_recommendation_without_ai(
+        profile=profile,
+        parsed_jd=parsed_jd,
+        session_id="obdx-regression-test",
+        ats_plan=ats_plan,
+    )
+
+    assert recommendation.target_title
+    assert "designation" not in recommendation.target_title.lower()
+    assert ":" not in recommendation.target_title
+
+    all_skills = []
+    for group in recommendation.skills:
+        all_skills.extend([s.lower() for s in group.skills])
+    
+    skills_text = " ".join(all_skills)
+    assert "pl/sql" in skills_text or "java" in skills_text or "microservices" in skills_text
+
+    if recommendation.summary:
+        summary_lower = recommendation.summary.lower()
+        assert "obdx" in summary_lower or "java" in summary_lower or "microservices" in summary_lower
+
+    for exp in recommendation.experience:
+        assert len(exp.bullets) >= 1, f"Experience {exp.title} has no bullets"
+    
+    for proj in recommendation.projects:
+        assert len(proj.bullets) >= 1, f"Project {proj.name} has no bullets"
+
+    latex_source = render_latex(recommendation)
+
+    empty_itemize = re.findall(r'\\begin\{itemize\}\s*\\end\{itemize\}', latex_source)
+    assert len(empty_itemize) == 0, f"Found empty itemize blocks: {empty_itemize}"
+
+    assert "Â¤" not in latex_source
+    assert "Â®" not in latex_source
+    assert "Â©" not in latex_source
+
+    ats_score = compute_ats_score(recommendation, parsed_jd, ats_plan)
+
+    assert ats_score.overall_score > 0
+    
+    all_warnings = " ".join(ats_score.warnings).lower()
+    assert "truthfulness" not in all_warnings
+    assert "evidence" not in all_warnings
+    assert "blocker" not in all_warnings

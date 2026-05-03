@@ -15,11 +15,27 @@ import type {
   RenderLatexResponse,
   RenderPdfRequest,
   RenderPdfResponse,
+  ApproveGeneratePdfRequest,
+  ApproveGeneratePdfResponse,
   PipelineGenerateRequest,
   PipelineGenerateResponse,
 } from '../types/resume';
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000/api/v1';
+const CLIENT_USER_ID_KEY = 'just-resume-client-user-id';
+
+function getClientUserId(): string {
+  const existing = localStorage.getItem(CLIENT_USER_ID_KEY);
+  if (existing) return existing;
+
+  const generated =
+    typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : `client-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+  localStorage.setItem(CLIENT_USER_ID_KEY, generated);
+  return generated;
+}
 
 class ApiError extends Error {
   status: number;
@@ -76,6 +92,7 @@ async function request<T>(
     const res = await fetch(url, {
       headers: {
         'Content-Type': 'application/json',
+        'X-Client-User-Id': getClientUserId(),
         ...options.headers,
       },
       ...options,
@@ -158,6 +175,15 @@ export async function renderPdf(data: RenderPdfRequest): Promise<RenderPdfRespon
   });
 }
 
+export async function approveGeneratePdf(
+  data: ApproveGeneratePdfRequest,
+): Promise<ApproveGeneratePdfResponse> {
+  return request('/resume/approve-generate-pdf', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  }, 180000);
+}
+
 // ─── Cover Letter ───────────────────────────────────────────────────────────
 
 export interface CoverLetterRequest {
@@ -165,6 +191,7 @@ export interface CoverLetterRequest {
   profile: MasterProfile;
   parsed_jd: ParsedJD;
   recommendation: ResumeRecommendation;
+  job_title?: string;
   tone?: string;
   additional_context?: string;
 }

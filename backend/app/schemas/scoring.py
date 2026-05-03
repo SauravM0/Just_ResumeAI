@@ -30,6 +30,16 @@ class KeywordScore(BaseModel):
     details: list[KeywordMatch] = Field(default_factory=list)
 
 
+class SkillScore(BaseModel):
+    """Required and preferred skills coverage score."""
+    required_total: int = 0
+    required_matched: int = 0
+    required_coverage_percent: float = Field(default=0.0, ge=0.0, le=100.0)
+    preferred_total: int = 0
+    preferred_matched: int = 0
+    preferred_coverage_percent: float = Field(default=0.0, ge=0.0, le=100.0)
+
+
 class ReadabilityScore(BaseModel):
     """Readability and formatting quality."""
     score: float = Field(default=0.0, ge=0.0, le=100.0)
@@ -40,15 +50,31 @@ class ReadabilityScore(BaseModel):
     )
 
 
+class SectionScore(BaseModel):
+    """Section completeness score."""
+    score: float = Field(default=0.0, ge=0.0, le=100.0)
+    missing_sections: list[str] = Field(default_factory=list)
+    has_contact: bool = True
+    has_summary: bool = True
+    has_experience: bool = True
+    has_skills: bool = True
+    has_education: bool = True
+
+
 class ATSScore(BaseModel):
     """Composite ATS-friendliness score (the main quality metric)."""
     overall_score: float = Field(default=0.0, ge=0.0, le=100.0)
     keyword_score: KeywordScore = Field(default_factory=KeywordScore)
+    skill_score: SkillScore = Field(default_factory=SkillScore)
     readability_score: ReadabilityScore = Field(default_factory=ReadabilityScore)
     format_score: float = Field(
         default=100.0, ge=0.0, le=100.0,
-        description="Always 100 since we use a fixed ATS-friendly template"
+        description="Formatting and parseability score"
     )
+    section_score: SectionScore = Field(default_factory=SectionScore)
+    responsibility_score: float = Field(default=0.0, ge=0.0, le=100.0)
+    title_alignment_score: float = Field(default=0.0, ge=0.0, le=100.0)
+    missing_keywords: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     recommendations: list[str] = Field(
         default_factory=list,

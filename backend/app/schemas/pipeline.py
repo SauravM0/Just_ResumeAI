@@ -9,6 +9,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 from app.schemas.jd import ParsedJD
+from app.schemas.alignment import ATSAlignmentReport
 from app.schemas.profile import MasterProfile
 from app.schemas.resume import ResumeRecommendation
 from app.schemas.scoring import ATSScore
@@ -38,6 +39,11 @@ class PipelineGenerateRequest(BaseModel):
     allow_two_pages_for_senior: bool = True
     generate_pdf: bool = False
     emphasis: Optional[str] = None
+    additional_alignment_text: Optional[str] = Field(
+        default=None,
+        max_length=6000,
+        description="Optional JD emphasis or keyword guidance."
+    )
 
 
 class PipelinePdfResult(BaseModel):
@@ -46,6 +52,9 @@ class PipelinePdfResult(BaseModel):
     pdf_url: Optional[str] = None
     compile_errors: list[str] = Field(default_factory=list)
     compile_warnings: list[str] = Field(default_factory=list)
+    generated_tex_path: Optional[str] = None
+    pdflatex_excerpt: Optional[str] = None
+    line_number: Optional[int] = None
 
 
 class PipelineGenerateResponse(BaseModel):
@@ -54,6 +63,7 @@ class PipelineGenerateResponse(BaseModel):
     eligibility: EligibilityResult
     recommendation: ResumeRecommendation
     ats_score: ATSScore
+    alignment_report: ATSAlignmentReport
     latex_source: str
     pdf: PipelinePdfResult = Field(default_factory=PipelinePdfResult)
     steps: list[PipelineStepStatus] = Field(default_factory=list)

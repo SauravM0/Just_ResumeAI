@@ -10,6 +10,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from .alignment import ATSAlignmentReport
 from .profile import MasterProfile
 
 
@@ -162,6 +163,11 @@ class ResumeRecommendRequest(BaseModel):
     session_id: str
     profile: MasterProfile
     emphasis: Optional[str] = None
+    additional_alignment_text: Optional[str] = Field(
+        default=None,
+        max_length=6000,
+        description="Optional JD emphasis or keyword guidance for regeneration."
+    )
     rejected_item_ids: list[str] = Field(
         default_factory=list,
         description="IDs of previously rejected items — must not reappear"
@@ -171,6 +177,7 @@ class ResumeRecommendRequest(BaseModel):
 class ResumeRecommendResponse(BaseModel):
     """Response from recommendation endpoint."""
     recommendation: ResumeRecommendation
+    alignment_report: Optional[ATSAlignmentReport] = None
 
 
 class ResumeRegenerateRequest(BaseModel):
@@ -178,6 +185,11 @@ class ResumeRegenerateRequest(BaseModel):
     session_id: str
     profile: MasterProfile
     emphasis: Optional[str] = None
+    additional_alignment_text: Optional[str] = Field(
+        default=None,
+        max_length=6000,
+        description="Optional JD emphasis or keyword guidance for regeneration."
+    )
     locked_bullet_ids: list[str] = Field(
         default_factory=list,
         description="Bullet IDs the user locked — preserve exactly"
@@ -211,9 +223,30 @@ class ResumeRenderPdfRequest(BaseModel):
     session_id: str
 
 
+class ResumeApproveGeneratePdfRequest(BaseModel):
+    """POST /api/v1/resume/approve-generate-pdf"""
+    session_id: str
+    recommendation: ResumeRecommendation
+
+
 class ResumeRenderPdfResponse(BaseModel):
     """PDF compilation result."""
     pdf_url: str = Field(..., description="URL to download the compiled PDF")
     compile_success: bool = True
     compile_errors: list[str] = Field(default_factory=list)
     compile_warnings: list[str] = Field(default_factory=list)
+    generated_tex_path: Optional[str] = None
+    pdflatex_excerpt: Optional[str] = None
+    line_number: Optional[int] = None
+
+
+class ResumeApproveGeneratePdfResponse(BaseModel):
+    """Combined LaTeX rendering + PDF compilation result."""
+    latex_source: str = ""
+    pdf_url: str = ""
+    compile_success: bool = True
+    compile_errors: list[str] = Field(default_factory=list)
+    compile_warnings: list[str] = Field(default_factory=list)
+    generated_tex_path: Optional[str] = None
+    pdflatex_excerpt: Optional[str] = None
+    line_number: Optional[int] = None

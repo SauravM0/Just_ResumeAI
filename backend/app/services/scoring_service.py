@@ -3,6 +3,8 @@ Scoring service — deterministic ATS score computation.
 
 This runs AFTER human review to give the user quality feedback.
 No AI involved — pure rule-based scoring.
+
+Measures resume-to-JD alignment, not truthfulness or evidence.
 """
 
 from __future__ import annotations
@@ -20,8 +22,16 @@ from app.domain.rules import (
     SCORE_WEIGHT_READABILITY,
 )
 from app.schemas.jd import ParsedJD
+from app.schemas.ats_planner import ATSKeywordPlannerOutput
 from app.schemas.resume import ResumeRecommendation, BulletStatus
-from app.schemas.scoring import ATSScore, KeywordMatch, KeywordScore, ReadabilityScore
+from app.schemas.scoring import (
+    ATSScore,
+    KeywordMatch,
+    KeywordScore,
+    ReadabilityScore,
+    SkillScore,
+    SectionScore,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,20 +44,33 @@ _TRIVIAL_KEYWORDS = {
 def compute_ats_score(
     recommendation: ResumeRecommendation,
     parsed_jd: ParsedJD,
+    ats_plan: ATSKeywordPlannerOutput | None = None,
 ) -> ATSScore:
     """
     Compute the composite ATS score for a resume recommendation.
     Called after the user finishes reviewing.
+
+    Measures resume-to-JD alignment only - no truthfulness or evidence validation.
     """
-    keyword_score = _compute_keyword_score(recommendation, parsed_jd)
+    keyword_score = _compute_keyword_score(recommendation, parsed_jd, ats_plan)
+    skill_score = _compute_skill_score(recommendation, parsed_jd, ats_plan)
     readability = _compute_readability_score(recommendation)
     format_score, format_issues = _compute_format_score(recommendation)
+    section_score = _compute_section_score(recommendation)
+    responsibility_score = _compute_responsibility_score(recommendation, parsed_jd)
+    title_alignment_score = _compute_title_alignment_score(recommendation, parsed_jd)
 
     overall = (
-        keyword_score.coverage_percent * SCORE_WEIGHT_KEYWORD
-        + readability.score * SCORE_WEIGHT_READABILITY
-        + format_score * SCORE_WEIGHT_FORMAT
+        keyword_score.coverage_percent * 0.30
+        + skill_score.required_coverage_percent * 0.20
+        + skill_score.preferred_coverage_percent * 0.10
+        + responsibility_score * 0.10
+        + title_alignment_score * 0.10
+        + format_score * 0.10
+        + section_score.score * 0.10
     )
+
+    missing_keywords = list(keyword_score.critical_missing)
 
     warnings: list[str] = []
     recommendations_list: list[str] = []
@@ -59,26 +82,29 @@ def compute_ats_score(
         )
     if keyword_score.critical_missing:
         warnings.append(
-            f"Missing critical keywords: {', '.join(keyword_score.critical_missing[:5])}"
+            f"Missing keywords: {', '.join(keyword_score.critical_missing[:5])}"
         )
+    if section_score.missing_sections:
         recommendations_list.append(
-            "Add the missing critical keywords to your experience bullets or skills section."
+            f"Fill missing sections: {', '.join(section_score.missing_sections[:3])}"
         )
+    if format_score < 100:
+        recommendations_list.extend(format_issues[:2])
     if readability.score < 70:
         recommendations_list.append(
             "Improve bullet readability: start with action verbs and keep bullets concise."
-        )
-    if format_score < 100:
-        warnings.extend(format_issues[:3])
-        recommendations_list.append(
-            "Tighten formatting quality by filling key sections, trimming long summaries, and fixing sparse or inconsistent entries."
         )
 
     return ATSScore(
         overall_score=round(overall, 1),
         keyword_score=keyword_score,
+        skill_score=skill_score,
         readability_score=readability,
         format_score=round(format_score, 1),
+        section_score=section_score,
+        responsibility_score=round(responsibility_score, 1),
+        title_alignment_score=round(title_alignment_score, 1),
+        missing_keywords=missing_keywords,
         warnings=warnings,
         recommendations=recommendations_list,
     )
@@ -87,11 +113,12 @@ def compute_ats_score(
 def _compute_keyword_score(
     recommendation: ResumeRecommendation,
     parsed_jd: ParsedJD,
+    ats_plan: ATSKeywordPlannerOutput | None = None,
 ) -> KeywordScore:
     """Check how many distinct JD keywords appear in the resume content."""
     corpus = _build_resume_corpus(recommendation)
-    normalized_keywords = _dedupe_jd_keywords(parsed_jd)
-    critical_candidates = _critical_keywords(parsed_jd)
+    normalized_keywords = _dedupe_jd_keywords(parsed_jd, ats_plan)
+    critical_candidates = _critical_keywords(parsed_jd, ats_plan)
 
     details: list[KeywordMatch] = []
     matched = 0
@@ -120,6 +147,39 @@ def _compute_keyword_score(
         coverage_percent=round(coverage, 1),
         critical_missing=critical_missing[:10],
         details=details,
+    )
+
+
+def _compute_skill_score(
+    recommendation: ResumeRecommendation,
+    parsed_jd: ParsedJD,
+    ats_plan: ATSKeywordPlannerOutput | None = None,
+) -> SkillScore:
+    """Compute required and preferred skills coverage."""
+    corpus = _build_resume_corpus(recommendation)
+
+    required_skills = list(parsed_jd.required_skills)
+    if ats_plan:
+        required_skills.extend(ats_plan.must_include_skills)
+
+    required_matched = 0
+    for skill in required_skills:
+        if _keyword_in_text(skill, corpus["body"]):
+            required_matched += 1
+
+    preferred_skills = list(parsed_jd.preferred_skills or [])
+    preferred_matched = 0
+    for skill in preferred_skills:
+        if _keyword_in_text(skill, corpus["body"]):
+            preferred_matched += 1
+
+    return SkillScore(
+        required_total=len(required_skills) or 1,
+        required_matched=required_matched,
+        required_coverage_percent=round((required_matched / max(len(required_skills), 1)) * 100, 1),
+        preferred_total=len(preferred_skills) or 1,
+        preferred_matched=preferred_matched,
+        preferred_coverage_percent=round((preferred_matched / max(len(preferred_skills), 1)) * 100, 1) if preferred_skills else 100.0,
     )
 
 
@@ -171,7 +231,7 @@ def _compute_readability_score(recommendation: ResumeRecommendation) -> Readabil
 
 
 def _compute_format_score(recommendation: ResumeRecommendation) -> tuple[float, list[str]]:
-    """Compute a conservative format score from visible resume quality signals."""
+    """Compute formatting/parseability score - penalize only structural issues."""
     penalties = 0.0
     issues: list[str] = []
 
@@ -181,16 +241,6 @@ def _compute_format_score(recommendation: ResumeRecommendation) -> tuple[float, 
     if not recommendation.contact.email.strip():
         penalties += 15
         issues.append("Contact email is missing.")
-    if not any(
-        [
-            recommendation.contact.phone,
-            recommendation.contact.linkedin_url,
-            recommendation.contact.github_url,
-            recommendation.contact.portfolio_url,
-        ]
-    ):
-        penalties += 5
-        issues.append("Contact details are sparse beyond the email address.")
 
     if not recommendation.summary:
         penalties += 10
@@ -201,45 +251,153 @@ def _compute_format_score(recommendation: ResumeRecommendation) -> tuple[float, 
 
     included_experience = [exp for exp in recommendation.experience if exp.included]
     included_projects = [proj for proj in recommendation.projects if proj.included]
-    included_skills = [group for group in recommendation.skills if group.skills]
-
-    if not included_experience:
-        penalties += 20
-        issues.append("No included work experience entries were found.")
-    if not included_skills:
-        penalties += 15
-        issues.append("Skills section is empty.")
 
     for exp in included_experience:
-        if not exp.start_date:
-            penalties += 4
-            issues.append(f"Experience entry '{exp.title}' is missing a start date.")
-        if not exp.is_current and not exp.end_date:
-            penalties += 4
-            issues.append(f"Experience entry '{exp.title}' is missing an end date.")
         if len(exp.bullets) > 5:
-            penalties += 5
-            issues.append(f"Experience entry '{exp.title}' has too many bullets.")
+            penalties += 3
+            issues.append(f"Experience '{exp.title}' has too many bullets.")
         if not exp.bullets:
-            penalties += 6
-            issues.append(f"Experience entry '{exp.title}' has no bullets.")
+            penalties += 5
+            issues.append(f"Experience '{exp.title}' has no bullets.")
 
     for proj in included_projects:
         if len(proj.bullets) > 5:
-            penalties += 4
+            penalties += 2
             issues.append(f"Project '{proj.name}' has too many bullets.")
         if not proj.bullets:
-            penalties += 4
+            penalties += 3
             issues.append(f"Project '{proj.name}' has no bullets.")
 
-    for warning in recommendation.warnings:
-        lower = warning.lower()
-        if "latex" in lower or "format" in lower or "missing" in lower:
-            penalties += 5
-            issues.append(f"Recommendation warning affects formatting quality: {warning}")
+    has_corrupted = _has_corrupted_chars(recommendation)
+    if has_corrupted:
+        penalties += 20
+        issues.append("Resume contains corrupted/non-ASCII characters that may break ATS parsing.")
 
     format_score = max(0.0, 100.0 - penalties)
     return format_score, _dedupe_strings(issues)
+
+
+def _has_corrupted_chars(recommendation: ResumeRecommendation) -> bool:
+    """Check for corrupted or unusual characters that break ATS."""
+    text = _get_raw_resume_text(recommendation)
+    corrupted_patterns = [
+        r"[\x00-\x08\x0b\x0c\x0e-\x1f]",
+        r"[Â¤Â®Â©Â™Â£Â¥Â€Â§Â¶Â©Â®Â°Â±Â²Â³ÂµÂ¹ÂºÂ»Â¼Â½Â¾Â¿]",
+    ]
+    for pattern in corrupted_patterns:
+        if re.search(pattern, text):
+            return True
+    if re.search(r"[^\x00-\x7F]", text):
+        return True
+    return False
+
+
+def _get_raw_resume_text(recommendation: ResumeRecommendation) -> str:
+    """Get raw text from resume without normalization."""
+    parts = [
+        recommendation.target_title or "",
+        recommendation.summary or "",
+    ]
+    for exp in recommendation.experience:
+        if not exp.included:
+            continue
+        parts.extend([exp.title, exp.company])
+        for bullet in exp.bullets:
+            if bullet.status != BulletStatus.REJECTED:
+                parts.append(bullet.text)
+    for proj in recommendation.projects:
+        if not proj.included:
+            continue
+        parts.append(proj.name)
+        for bullet in proj.bullets:
+            if bullet.status != BulletStatus.REJECTED:
+                parts.append(bullet.text)
+        parts.extend(proj.technologies)
+    for group in recommendation.skills:
+        parts.append(group.category)
+        parts.extend(group.skills)
+    return " ".join(parts)
+
+
+def _compute_section_score(recommendation: ResumeRecommendation) -> SectionScore:
+    """Compute section completeness score."""
+    missing_sections = []
+
+    has_contact = bool(recommendation.contact.full_name.strip() and recommendation.contact.email.strip())
+    if not has_contact:
+        missing_sections.append("Contact")
+
+    has_summary = bool(recommendation.summary and recommendation.summary.strip())
+    if not has_summary:
+        missing_sections.append("Summary")
+
+    has_experience = any(exp.bullets for exp in recommendation.experience if exp.included)
+    if not has_experience:
+        missing_sections.append("Experience")
+
+    has_skills = any(group.skills for group in recommendation.skills)
+    if not has_skills:
+        missing_sections.append("Skills")
+
+    has_education = bool(recommendation.education)
+    if not has_education:
+        missing_sections.append("Education")
+
+    checks = [has_contact, has_summary, has_experience, has_skills, has_education]
+    score = sum(1 for check in checks if check) / len(checks) * 100
+
+    return SectionScore(
+        score=round(score, 1),
+        missing_sections=missing_sections,
+        has_contact=has_contact,
+        has_summary=has_summary,
+        has_experience=has_experience,
+        has_skills=has_skills,
+        has_education=has_education,
+    )
+
+
+def _compute_responsibility_score(recommendation: ResumeRecommendation, parsed_jd: ParsedJD) -> float:
+    """Compute responsibility coverage score."""
+    if not parsed_jd.responsibilities:
+        return 100.0
+    corpus = _build_resume_corpus(recommendation)["body"]
+    matched = sum(1 for responsibility in parsed_jd.responsibilities if _keyword_in_text(responsibility, corpus))
+    return round((matched / len(parsed_jd.responsibilities)) * 100, 1)
+
+
+def _compute_title_alignment_score(recommendation: ResumeRecommendation, parsed_jd: ParsedJD) -> float:
+    """Compute job title alignment score."""
+    if not parsed_jd.job_title:
+        return 100.0
+
+    resume_title = (recommendation.target_title or "").lower()
+    jd_title = parsed_jd.job_title.lower()
+
+    if jd_title in resume_title:
+        return 100.0
+
+    resume_words = set(re.sub(r"[^\w\s]", " ", resume_title).split())
+    jd_words = set(re.sub(r"[^\w\s]", " ", jd_title).split())
+    jd_words = {w for w in jd_words if len(w) > 2}
+
+    if not jd_words:
+        return 100.0
+
+    matches = len(resume_words & jd_words)
+    return round((matches / len(jd_words)) * 100, 1)
+
+
+def _keyword_in_text(keyword: str, text: str) -> bool:
+    normalized_keyword = _normalize_keyword(keyword)
+    if not normalized_keyword:
+        return False
+    pattern = (
+        re.compile(rf"(?<!\w){re.escape(normalized_keyword)}(?!\w)")
+        if " " in normalized_keyword
+        else re.compile(rf"\b{re.escape(normalized_keyword)}\b")
+    )
+    return bool(pattern.search(text))
 
 
 def _normalize_keyword(keyword: str) -> str:
@@ -331,13 +489,30 @@ def _match_keyword(keyword: str, corpus: dict[str, str]) -> tuple[bool, str]:
     return False, ""
 
 
-def _dedupe_jd_keywords(parsed_jd: ParsedJD) -> list[str]:
+def _dedupe_jd_keywords(
+    parsed_jd: ParsedJD,
+    ats_plan: ATSKeywordPlannerOutput | None = None,
+) -> list[str]:
     """Normalize and dedupe JD keywords, preserving phrases and input order."""
     deduped: list[str] = []
     seen: set[str] = set()
 
-    for keyword in parsed_jd.keywords:
-        normalized = _normalize_keyword(keyword.keyword)
+    planner_values = [
+        *(
+            [
+                *ats_plan.priority_keywords,
+                *ats_plan.must_include_skills,
+                *ats_plan.must_include_tools_platforms,
+                *ats_plan.must_include_responsibilities,
+            ]
+            if ats_plan
+            else []
+        ),
+        *[keyword.keyword for keyword in parsed_jd.keywords],
+    ]
+
+    for keyword in planner_values:
+        normalized = _normalize_keyword(keyword)
         if not normalized or normalized in seen:
             continue
         if normalized in _TRIVIAL_KEYWORDS:
@@ -345,17 +520,20 @@ def _dedupe_jd_keywords(parsed_jd: ParsedJD) -> list[str]:
         if len(normalized) <= 2 and " " not in normalized:
             continue
         seen.add(normalized)
-        deduped.append(keyword.keyword.strip())
+        deduped.append(keyword.strip())
 
     return deduped
 
 
-def _critical_keywords(parsed_jd: ParsedJD) -> list[str]:
+def _critical_keywords(
+    parsed_jd: ParsedJD,
+    ats_plan: ATSKeywordPlannerOutput | None = None,
+) -> list[str]:
     """Critical missing keywords come from required skills and high-importance JD keywords."""
     candidates: list[str] = []
     seen: set[str] = set()
 
-    for skill in parsed_jd.required_skills:
+    for skill in ([*ats_plan.must_include_skills, *ats_plan.priority_keywords] if ats_plan else parsed_jd.required_skills):
         normalized = _normalize_keyword(skill)
         if normalized and normalized not in seen:
             seen.add(normalized)

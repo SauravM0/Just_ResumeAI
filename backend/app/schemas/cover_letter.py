@@ -19,9 +19,13 @@ class CoverLetterRequest(BaseModel):
     profile: MasterProfile
     parsed_jd: ParsedJD
     recommendation: ResumeRecommendation
+    job_title: Optional[str] = Field(
+        None,
+        description="Target job title (uses parsed_jd.job_title if not provided)"
+    )
     tone: str = Field(
-        default="professional",
-        description="Tone: 'professional', 'enthusiastic', 'conversational'"
+        default="Professional",
+        description="Tone: 'Professional', 'Enthusiastic', 'Concise', 'Bold'"
     )
     additional_context: Optional[str] = Field(
         None,

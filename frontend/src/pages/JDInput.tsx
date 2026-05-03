@@ -24,6 +24,7 @@ export default function JDInput() {
     setParsedJD,
     setRecommendation,
     setAtsScore,
+    setAlignmentReport,
     setLatexSource,
     setEligibility,
     setPipelinePdf,
@@ -40,6 +41,7 @@ export default function JDInput() {
       setParsedJD(data.parsed_jd);
       setRecommendation(data.recommendation);
       setAtsScore(data.ats_score);
+      setAlignmentReport(data.alignment_report);
       setLatexSource(data.latex_source);
       setEligibility(data.eligibility);
       setPipelinePdf(data.pdf);
@@ -68,6 +70,7 @@ export default function JDInput() {
       target_pages: 1,
       allow_two_pages_for_senior: true,
       generate_pdf: false,
+      additional_alignment_text: undefined,
     });
   };
 
@@ -121,12 +124,18 @@ export default function JDInput() {
 
         {pipelineMutation.isPending && (
           <div className="card" style={{ marginBottom: 'var(--space-md)' }}>
-            <div className="card-title" style={{ marginBottom: 'var(--space-sm)' }}>Generating Resume</div>
+            <div className="card-title" style={{ marginBottom: 'var(--space-sm)' }}>Generating ATS Resume</div>
             <div className="pipeline-steps">
-              {['Analyze JD', 'Check fit', 'Create resume', 'Score ATS', 'Render LaTeX'].map((label, index) => (
-                <div key={label} className={`pipeline-step ${index === 0 ? 'step-active' : ''}`}>
-                  <span>{index === 0 ? <span className="spinner" /> : index + 1}</span>
-                  <span>{label}</span>
+              {[
+                { label: 'Analyzing JD', icon: '📋' },
+                { label: 'Optimizing keywords', icon: '🔑' },
+                { label: 'Generating ATS resume', icon: '📝' },
+                { label: 'Scoring & alignment', icon: '📊' },
+                { label: 'Preparing PDF-ready content', icon: '✨' },
+              ].map((step, index) => (
+                <div key={step.label} className={`pipeline-step ${index === 0 ? 'step-active' : ''}`}>
+                  <span>{index === 0 ? <span className="spinner" /> : step.icon}</span>
+                  <span>{step.label}</span>
                 </div>
               ))}
             </div>
@@ -169,10 +178,10 @@ export default function JDInput() {
             {pipelineMutation.isPending ? (
               <>
                 <span className="spinner" />
-                Creating resume...
+                Generating ATS Resume...
               </>
             ) : (
-              'Analyze JD & Create Resume'
+              'Generate ATS Resume'
             )}
           </button>
         </div>

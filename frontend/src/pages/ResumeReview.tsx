@@ -12,7 +12,8 @@
 import { useState, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useMutation } from '@tanstack/react-query';
-import { recommendResume, regenerateResume, validateResume, renderLatex } from '../lib/api';
+import { approveGeneratePdf, recommendResume, regenerateResume, validateResume } from '../lib/api';
+import AlignmentMetricsPanel from '../components/AlignmentMetricsPanel';
 import { getDefaultProfile } from '../lib/db';
 import { sanitizeProfile } from '../lib/profile';
 import { useAppStore } from '../store/useAppStore';
@@ -21,7 +22,9 @@ import type {
   ResumeProjectEntry,
   ResumeBullet,
   BulletStatus,
-  ATSScore,
+  ApproveGeneratePdfRequest,
+  ApproveGeneratePdfResponse,
+  ResumeRecommendResponse,
 } from '../types/resume';
 import type { MasterProfile } from '../types/profile';
 
@@ -42,14 +45,15 @@ function updateEntryBullet<T extends ResumeExperienceEntry | ResumeProjectEntry>
 }
 
 export default function ResumeReview() {
-  const navigate = useNavigate();
+const navigate = useNavigate();
   const {
     sessionId, parsedJD, recommendation, setRecommendation,
-    atsScore, setAtsScore, setLatexSource, setStep,
-    setActiveProfile, warnings, eligibility, pipelinePdf,
+    atsScore, setAtsScore, latexSource, setLatexSource, setPipelinePdf, setStep,
+    setActiveProfile, pipelinePdf, setAlignmentReport, alignmentReport,
   } = useAppStore();
 
   const [emphasis, setEmphasis] = useState('');
+  const [additionalContext, setAdditionalContext] = useState('');
   const [activeTab, setActiveTab] = useState<'experience' | 'projects' | 'skills' | 'scores'>('experience');
   const [resolvedProfile, setResolvedProfile] = useState<MasterProfile | null>(null);
   const [isCheckingProfile, setIsCheckingProfile] = useState(false);
@@ -112,7 +116,12 @@ export default function ResumeReview() {
 
   const regenerateMutation = useMutation({
     mutationFn: regenerateResume,
-    onSuccess: (data) => setRecommendation(data.recommendation),
+    onSuccess: (data: ResumeRecommendResponse) => {
+      setRecommendation(data.recommendation);
+      if (data.alignment_report) {
+        setAlignmentReport(data.alignment_report);
+      }
+    },
   });
 
   const validateMutation = useMutation({
@@ -120,16 +129,42 @@ export default function ResumeReview() {
     onSuccess: (data) => setAtsScore(data.ats_score),
   });
 
-  const latexMutation = useMutation({
-    mutationFn: renderLatex,
+  const approvePdfMutation = useMutation<ApproveGeneratePdfResponse, Error, ApproveGeneratePdfRequest>({
+    mutationFn: approveGeneratePdf,
     onSuccess: (data) => {
-      setRenderError(null);
-      setLatexSource(data.latex_source);
-      setStep('latex-editor');
-      navigate('/editor');
+      if (data.compile_success) {
+        setRenderError(null);
+        setLatexSource(data.latex_source);
+        setPipelinePdf({
+          requested: true,
+          compile_success: true,
+          pdf_url: data.pdf_url,
+          compile_errors: [],
+          compile_warnings: data.compile_warnings || [],
+          generated_tex_path: data.generated_tex_path,
+          pdflatex_excerpt: data.pdflatex_excerpt,
+          line_number: data.line_number,
+        });
+        setStep('latex-editor');
+        navigate('/editor');
+        return;
+      }
+
+      setLatexSource(data.latex_source || '');
+      setPipelinePdf({
+        requested: true,
+        compile_success: false,
+        pdf_url: undefined,
+        compile_errors: data.compile_errors || ['PDF compilation failed.'],
+        compile_warnings: data.compile_warnings || [],
+        generated_tex_path: data.generated_tex_path,
+        pdflatex_excerpt: data.pdflatex_excerpt,
+        line_number: data.line_number,
+      });
+      setRenderError((data.compile_errors || ['PDF compilation failed.']).join('; '));
     },
     onError: (error) => {
-      setRenderError((error as Error).message || 'LaTeX rendering failed. Please try again.');
+      setRenderError(error.message || 'PDF generation failed. Please try again.');
     },
   });
 
@@ -156,12 +191,13 @@ export default function ResumeReview() {
       session_id: sessionId,
       profile: resolvedProfile,
       emphasis: emphasis || undefined,
+      additional_alignment_text: additionalContext || undefined,
       locked_bullet_ids: getLockedBulletIds(),
       rejected_item_ids: getRejectedIds(),
     });
   };
 
-  const handleValidate = () => {
+const handleValidate = () => {
     if (!sessionId || !recommendation || !parsedJD) return;
     validateMutation.mutate({
       session_id: sessionId,
@@ -169,13 +205,9 @@ export default function ResumeReview() {
     });
   };
 
-  const handleRenderLatex = () => {
-    if (!sessionId || !recommendation) return;
-    setRenderError(null);
-    latexMutation.mutate({
-      session_id: sessionId,
-      recommendation,
-    });
+  const handleOpenLatexEditor = () => {
+    setStep('latex-editor');
+    navigate('/editor');
   };
 
   const updateBulletStatus = (expIndex: number, bulletIndex: number, status: BulletStatus, section: ReviewSection) => {
@@ -293,7 +325,16 @@ export default function ResumeReview() {
     );
   }
 
-  const rec = recommendation;
+const rec = recommendation;
+
+  const handleApprovePdf = () => {
+    if (!sessionId || !recommendation) return;
+    setRenderError(null);
+    approvePdfMutation.mutate({
+      session_id: sessionId,
+      recommendation,
+    });
+  };
 
   return (
     <div className="animate-fade-in">
@@ -301,78 +342,148 @@ export default function ResumeReview() {
         <div>
           <h1 className="page-title">Review Resume</h1>
           <p className="page-subtitle">
-            Review AI recommendations. Accept, edit, lock, or reject items before rendering.
+            Review AI recommendations. Accept, edit, lock, or reject items before generating PDF.
           </p>
         </div>
         <div style={{ display: 'flex', gap: 'var(--space-sm)' }}>
-          <button className="btn btn-secondary" onClick={handleValidate} disabled={validateMutation.isPending}>
-            {validateMutation.isPending ? <span className="spinner" /> : '📊'} Score
-          </button>
-          <button className="btn btn-primary" onClick={handleRenderLatex} disabled={latexMutation.isPending}>
-            {latexMutation.isPending ? <span className="spinner" /> : '📑'} Render LaTeX
+          <button className="btn btn-primary" onClick={handleApprovePdf} disabled={approvePdfMutation.isPending}>
+            {approvePdfMutation.isPending ? (
+              <>
+                <span className="spinner" />
+                Generating PDF...
+              </>
+            ) : (
+              '✓ Approve & Generate PDF'
+            )}
           </button>
         </div>
       </div>
 
-      {/* Warnings */}
-      {eligibility?.status === 'hard_mismatch' && (
-        <div className="warning-banner warning-error" style={{ marginBottom: 'var(--space-md)' }}>
-          <span>⚠️</span>
-          <span>Resume can be generated, but this JD has hard eligibility mismatch.</span>
-        </div>
-      )}
+      <AlignmentMetricsPanel alignmentReport={alignmentReport} atsScore={atsScore} />
 
-      {eligibility && (eligibility.blocking_issues.length > 0 || eligibility.warnings.length > 0) && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-sm)', marginBottom: 'var(--space-xl)' }}>
-          {[...eligibility.blocking_issues, ...eligibility.warnings].map((w, i) => (
-            <div key={i} className={eligibility.status === 'hard_mismatch' ? 'warning-banner warning-error' : 'warning-banner warning-warn'}>
-              <span>⚠️</span><span>{w}</span>
+      {/* ATS Score Card - Prominent display */}
+      {atsScore && (
+        <div className="card" style={{ marginBottom: 'var(--space-lg)', background: 'linear-gradient(135deg, var(--bg-secondary) 0%, var(--bg-tertiary) 100%)', border: '1px solid var(--border-color)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-md)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-lg)' }}>
+              <div style={{ textAlign: 'center' }}>
+                <div style={{ fontSize: '2.5rem', fontWeight: 700, color: atsScore.overall_score >= 75 ? 'var(--status-success)' : atsScore.overall_score >= 50 ? 'var(--status-warning)' : 'var(--status-danger)' }}>
+                  {Math.round(atsScore.overall_score)}
+                </div>
+                <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Overall ATS Score</div>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-xs)' }}>
+                <div style={{ display: 'flex', gap: 'var(--space-md)', fontSize: '0.9rem' }}>
+                  <span><strong>{Math.round(atsScore.keyword_score.coverage_percent)}%</strong> Keywords</span>
+                  <span><strong>{Math.round(atsScore.skill_score.required_coverage_percent)}%</strong> Required Skills</span>
+                  <span><strong>{Math.round(atsScore.responsibility_score)}%</strong> Responsibilities</span>
+                </div>
+                <div style={{ display: 'flex', gap: 'var(--space-md)', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                  <span><strong>{Math.round(atsScore.format_score)}</strong> Format</span>
+                  <span><strong>{Math.round(atsScore.section_score.score)}</strong> Sections</span>
+                  <span><strong>{Math.round(atsScore.title_alignment_score)}</strong> Title Match</span>
+                </div>
+              </div>
             </div>
-          ))}
-        </div>
-      )}
-
-      {pipelinePdf?.requested && !pipelinePdf.compile_success && (
-        <div className="warning-banner warning-warn" style={{ marginBottom: 'var(--space-xl)' }}>
-          <span>⚠️</span>
-          <span>
-            LaTeX generated successfully, PDF compile failed: {pipelinePdf.compile_errors.join('; ') || 'Unknown PDF compilation error.'}
-          </span>
-        </div>
-      )}
-
-      {(rec.warnings.length > 0 || warnings.length > 0) && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-sm)', marginBottom: 'var(--space-xl)' }}>
-          {Array.from(new Set([...warnings, ...rec.warnings])).map((w, i) => (
-            <div key={i} className="warning-banner warning-warn">
-              <span>⚠️</span><span>{w}</span>
+            <button className="btn btn-secondary" onClick={handleValidate} disabled={validateMutation.isPending}>
+              {validateMutation.isPending ? <span className="spinner" /> : '🔄 Recalculate Score'}
+            </button>
+          </div>
+          {atsScore.missing_keywords.length > 0 && (
+            <div style={{ marginTop: 'var(--space-md)', paddingTop: 'var(--space-md)', borderTop: '1px solid var(--border-color)' }}>
+              <div style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: 'var(--space-xs)' }}>Missing Keywords:</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                {atsScore.missing_keywords.slice(0, 10).map((kw) => (
+                  <span key={kw} className="keyword-tag keyword-missing">{kw}</span>
+                ))}
+              </div>
             </div>
-          ))}
+          )}
+          {atsScore.recommendations.length > 0 && (
+            <div style={{ marginTop: 'var(--space-md)', paddingTop: 'var(--space-md)', borderTop: '1px solid var(--border-color)' }}>
+              <div style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: 'var(--space-xs)' }}>Recommendations:</div>
+              <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                {atsScore.recommendations.slice(0, 3).join(' • ')}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
-      {renderError && (
-        <div className="warning-banner warning-error" style={{ marginBottom: 'var(--space-xl)' }}>
-          <span>❌</span>
-          <div>
-            <strong>LaTeX Render Failed</strong>
-            <p style={{ margin: 0, marginTop: '4px', fontSize: '0.8rem' }}>{renderError}</p>
+      {/* PDF Generation Success Message */}
+      {pipelinePdf?.requested && pipelinePdf.compile_success && (
+        <div className="warning-banner" style={{ marginBottom: 'var(--space-md)', background: 'var(--status-success)', color: 'white' }}>
+          <span>✓</span>
+          <span>PDF generated successfully! You can download it or edit the LaTeX source.</span>
+        </div>
+      )}
+
+{/* PDF Failure - Show on review page */}
+      {(renderError || (pipelinePdf?.requested && !pipelinePdf.compile_success)) && (
+        <div className="card" style={{ marginBottom: 'var(--space-xl)', borderColor: 'var(--status-danger)', background: 'var(--bg-tertiary)' }}>
+          <div className="card-title" style={{ marginBottom: 'var(--space-sm)', color: 'var(--status-danger)' }}>
+            ⚠️ PDF Generation Failed
+          </div>
+          <p style={{ marginTop: 0, color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+            {renderError || pipelinePdf?.compile_errors.join('; ') || 'PDF compilation failed. Your resume is ready for review below - try regenerating or open the LaTeX editor to fix the issue.'}
+          </p>
+          {pipelinePdf?.line_number && (
+            <p style={{ margin: 0, color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+              Approximate LaTeX line: <strong>{pipelinePdf.line_number}</strong>
+            </p>
+          )}
+          <div style={{ display: 'flex', gap: 'var(--space-sm)', flexWrap: 'wrap', marginTop: 'var(--space-md)' }}>
+            <button className="btn btn-secondary" onClick={handleRegenerate} disabled={regenerateMutation.isPending}>
+              {regenerateMutation.isPending ? <span className="spinner" /> : '🔄 Regenerate'}
+            </button>
+            {latexSource && (
+              <button className="btn btn-primary" onClick={handleOpenLatexEditor}>
+                Open LaTeX Editor
+              </button>
+            )}
           </div>
         </div>
-      )}
-
-      {/* Score Cards (if validated) */}
-      {atsScore && <ScoreCards score={atsScore} />}
+)}
 
       {/* Regeneration Controls */}
-      <div className="card" style={{ marginBottom: 'var(--space-lg)', display: 'flex', gap: 'var(--space-md)', alignItems: 'center', flexWrap: 'wrap' }}>
-        <div className="form-group" style={{ flex: 1, minWidth: '200px', marginBottom: 0 }}>
-          <label className="form-label">Emphasis (optional)</label>
-          <input className="form-input" value={emphasis} onChange={(e) => setEmphasis(e.target.value)} placeholder="e.g. leadership, backend, ML engineering" />
+      <div className="card" style={{ marginBottom: 'var(--space-lg)', background: 'var(--bg-secondary)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-md)' }}>
+          <div className="card-title" style={{ marginBottom: 0 }}>🔄 Regenerate Resume</div>
+          <button className="btn btn-primary" onClick={handleRegenerate} disabled={regenerateMutation.isPending}>
+            {regenerateMutation.isPending ? (
+              <>
+                <span className="spinner" />
+                Regenerating...
+              </>
+            ) : (
+              'Regenerate for higher ATS score'
+            )}
+          </button>
         </div>
-        <button className="btn btn-secondary" onClick={handleRegenerate} disabled={regenerateMutation.isPending}>
-          {regenerateMutation.isPending ? <span className="spinner" /> : '🔄'} Regenerate
-        </button>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: 'var(--space-md)' }}>
+          <div className="form-group" style={{ marginBottom: 0 }}>
+            <label className="form-label">Focus keywords / Emphasis</label>
+            <input
+              className="form-input"
+              value={emphasis}
+              onChange={(e) => setEmphasis(e.target.value)}
+              placeholder="e.g. leadership, backend, OBDX, microservices"
+              disabled={regenerateMutation.isPending}
+            />
+            <div className="form-hint">Optional: highlight specific skills or areas</div>
+          </div>
+          <div className="form-group" style={{ marginBottom: 0 }}>
+            <label className="form-label">Additional context</label>
+            <textarea
+              className="form-textarea"
+              value={additionalContext}
+              onChange={(e) => setAdditionalContext(e.target.value)}
+              placeholder="Add specific JD keywords, tools, or responsibilities to emphasize..."
+              style={{ minHeight: 70 }}
+              disabled={regenerateMutation.isPending}
+            />
+          </div>
+        </div>
       </div>
 
       {/* Resume Title & Summary */}
@@ -581,61 +692,6 @@ function BulletReviewItem({
           <button className="btn btn-ghost btn-sm" onClick={() => onStatusChange('pending')} title="Restore">↩</button>
         )}
       </div>
-    </div>
-  );
-}
-
-// ─── Score Cards Component ──────────────────────────────────────────────────
-
-function ScoreCards({ score }: { score: ATSScore }) {
-  const getScoreClass = (val: number) => val >= 75 ? 'score-high' : val >= 50 ? 'score-mid' : 'score-low';
-
-  return (
-    <div style={{ marginBottom: 'var(--space-xl)' }}>
-      <div className="score-grid">
-        <div className="score-card">
-          <div className={`score-value ${getScoreClass(score.overall_score)}`}>{Math.round(score.overall_score)}</div>
-          <div className="score-label">ATS Score</div>
-        </div>
-        <div className="score-card">
-          <div className={`score-value ${getScoreClass(score.keyword_score.coverage_percent)}`}>
-            {Math.round(score.keyword_score.coverage_percent)}%
-          </div>
-          <div className="score-label">Keyword Coverage</div>
-        </div>
-        <div className="score-card">
-          <div className={`score-value ${getScoreClass(score.readability_score.score)}`}>
-            {Math.round(score.readability_score.score)}
-          </div>
-          <div className="score-label">Readability</div>
-        </div>
-        <div className="score-card">
-          <div className="score-value score-high">{Math.round(score.format_score)}</div>
-          <div className="score-label">Format</div>
-        </div>
-      </div>
-
-      {score.recommendations.length > 0 && (
-        <div className="card" style={{ marginTop: 'var(--space-md)' }}>
-          <div className="card-title" style={{ marginBottom: 'var(--space-sm)' }}>💡 Recommendations</div>
-          {score.recommendations.map((r, i) => (
-            <div key={i} className="warning-banner warning-info" style={{ marginBottom: 'var(--space-xs)' }}>
-              <span>→</span><span>{r}</span>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {score.keyword_score.critical_missing.length > 0 && (
-        <div className="card" style={{ marginTop: 'var(--space-md)' }}>
-          <div className="card-title" style={{ marginBottom: 'var(--space-sm)' }}>🚨 Missing Critical Keywords</div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
-            {score.keyword_score.critical_missing.map((kw) => (
-              <span key={kw} className="keyword-tag keyword-missing">{kw}</span>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
+</div>
   );
 }
