@@ -170,6 +170,49 @@ cd frontend
 npm run build
 ```
 
+## Deploy To Render And Vercel
+
+This repo includes `render.yaml` for the backend and `frontend/vercel.json` for the Vite frontend.
+
+### Backend on Render
+
+Create a Render Web Service from this repo. The included `render.yaml` uses the backend Dockerfile so the LaTeX packages needed for PDF generation are installed.
+
+Set these Render environment variables:
+
+```env
+DEBUG=false
+GEMINI_API_KEY=your_api_key_here
+GEMINI_MODEL=gemini-2.5-flash
+GEMINI_REVIEW_MODEL=gemini-2.5-pro
+CORS_ORIGINS=https://your-frontend.vercel.app
+LATEX_OUTPUT_DIR=/app/output
+SESSION_DB_PATH=/app/output/sessions.sqlite3
+```
+
+After Render deploys, your API base will be:
+
+```text
+https://your-backend.onrender.com/api/v1
+```
+
+### Frontend on Vercel
+
+Import the repo in Vercel and set the project root directory to `frontend`.
+
+Set this Vercel environment variable:
+
+```env
+VITE_API_BASE=https://your-backend.onrender.com/api/v1
+```
+
+After Vercel deploys, copy the final Vercel URL back into Render's `CORS_ORIGINS`.
+For multiple allowed frontend URLs, use a comma-separated value:
+
+```env
+CORS_ORIGINS=https://your-frontend.vercel.app,https://your-custom-domain.com
+```
+
 ## Available Frontend Pages
 
 - Dashboard

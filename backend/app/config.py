@@ -4,6 +4,7 @@ Uses pydantic-settings for type-safe config with validation.
 """
 
 from functools import lru_cache
+import json
 from pathlib import Path
 
 from pydantic import field_validator
@@ -54,6 +55,18 @@ class Settings(BaseSettings):
     def _parse_debug(cls, value):
         if isinstance(value, str) and value.lower() in {"release", "prod", "production"}:
             return False
+        return value
+
+    @field_validator("CORS_ORIGINS", mode="before")
+    @classmethod
+    def _parse_cors_origins(cls, value):
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return []
+            if raw.startswith("["):
+                return json.loads(raw)
+            return [origin.strip() for origin in raw.split(",") if origin.strip()]
         return value
 
 

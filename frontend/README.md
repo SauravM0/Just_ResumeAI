@@ -18,6 +18,8 @@ Common local defaults:
 - `GEMINI_MODEL=gemini-2.5-flash`
 - `DEBUG=true`
 - `CORS_ORIGINS=["http://localhost:5173"]`
+- Vercel production frontend: set `VITE_API_BASE=https://your-backend.onrender.com/api/v1`
+- Render production backend: set `CORS_ORIGINS=https://your-frontend.vercel.app`
 
 Notes:
 

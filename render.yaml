@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: justresume-backend
+    runtime: docker
+    plan: free
+    dockerContext: ./backend
+    dockerfilePath: ./backend/Dockerfile
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: DEBUG
+        value: "false"
+      - key: CORS_ORIGINS
+        value: https://your-frontend.vercel.app
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: GEMINI_REVIEW_MODEL
+        value: gemini-2.5-pro
+      - key: LATEX_OUTPUT_DIR
+        value: /app/output
+      - key: SESSION_DB_PATH
+        value: /app/output/sessions.sqlite3
