@@ -12,6 +12,7 @@ The orchestrator enforces deterministic rules AFTER each AI step.
 from __future__ import annotations
 
 import logging
+import re
 from app.ai.gemini_client import get_gemini_client, GeminiClientError
 from app.domain.rules import (
     MAX_EXPERIENCES,
@@ -34,9 +35,16 @@ from app.schemas.resume import (
     ResumeEducationEntry,
     ResumeSkillGroup,
     ResumeCertEntry,
+    ResumeAchievementEntry,
+    ResumeCustomSection,
     ResumeBullet,
     BulletStatus,
 )
+from app.services.resume_strength_service import strengthen_resume_recommendation
+from app.services.resume_budget_service import fit_resume_to_page_budget
+from app.services.resume_quality_gate import apply_resume_quality_gate, build_skill_taxonomy
+from app.services.resume_strategy_service import build_resume_strategy
+from app.services.keyword_placement_service import build_master_keyword_list
 
 logger = logging.getLogger(__name__)
 
@@ -60,8 +68,6 @@ class _RelevanceResult(BaseModel):
     experience_scores: list[_RelevanceItem] = Field(default_factory=list)
     project_scores: list[_RelevanceItem] = Field(default_factory=list)
     education_relevant: bool = True
-    profile_strength: str = Field(default="moderate", description="'strong', 'moderate', 'weak'")
-    profile_warnings: list[str] = Field(default_factory=list)
 
 
 class _ComposedBullet(BaseModel):
@@ -100,36 +106,139 @@ RULES:
 1. Score each item from 0.0 (irrelevant) to 1.0 (perfect match).
 2. List which JD keywords each item matches.
 3. Provide brief reasoning for each score.
-4. Assess overall profile strength ('strong', 'moderate', 'weak').
-5. If weak, provide specific warnings about gaps.
-6. Return ONLY valid JSON matching the schema."""
+4. If the profile has NO experiences or NO projects, return empty lists — do not error.
+5. Return ONLY valid JSON matching the schema."""
 
-COMPOSER_SYSTEM_PROMPT = """You are an expert resume writer creating highly JD-aligned ATS-optimized resume content.
+COMPOSER_SYSTEM_PROMPT = """
+╔══════════════════════════════════════════════════════════════════════════╗
+║         JD-FIRST ATS RESUME COMPOSER — 100% KEYWORD COVERAGE           ║
+║         GOAL: JD IN → PERFECT ATS RESUME OUT — ZERO EXCEPTIONS         ║
+╚══════════════════════════════════════════════════════════════════════════╝
 
-RULES:
-1. Every bullet MUST start with a strong action verb from the allowed list.
-2. Include quantifiable metrics where possible (%, $, time saved, scale).
-3. Naturally weave in relevant JD keywords without keyword stuffing or repetition.
-4. Each bullet must be {min_len}-{max_len} characters.
-5. Generate {min_bullets}-{max_bullets} bullets per experience. If you cannot generate at least 2 meaningful bullets for an entry, omit that entry entirely.
-6. The professional summary must be under {max_summary} words and MUST include:
-   - The target JD title (or a very close variation)
-   - 5-8 priority JD keywords woven in naturally
-7. Write for a {seniority} level position.
-8. Use the ATS keyword planner as the main guide for all content.
-9. Technical Skills section must include all JD-required skills grouped cleanly by category.
-10. Experience bullets must be rewritten to reflect JD responsibilities, not just copy original profile bullets.
-11. Projects must be selected and rewritten to match JD relevance.
-12. AVOID:
-    - Awkward copy-paste wording from the JD
-    - Grammar errors like "Results-driven Application" (never start with "Results-driven" as an adjective before a noun)
-    - Repeating the same keyword multiple times unnaturally
-    - Copying labels like "Designation:" into the resume
-    - Any content that could be flagged as fake or invented (companies, dates, employers, certifications)
-13. Keep output ATS-friendly: simple section names, clean bullets, no graphics-dependent content.
-14. If the JD mentions specialized platforms (e.g., OBDX), create relevant skill groupings or sections for them.
-15. If exact experience is not available, still optimize wording around related development, deployment, troubleshooting, microservices, UI, DevOps, and mobile skills.
-16. Return ONLY valid JSON matching the schema."""
+You are the world's best ATS resume writer. Your ONLY goal is a 100% ATS match.
+The JD is your PRIMARY source. The profile provides the candidate's name,
+company names, job titles, education, and dates ONLY.
+ALL bullet content is derived from the JD. NO profile bullet is copied as-is.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RULE 0 — JD IS THE ONLY SOURCE OF TRUTH (ABSOLUTE):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  The JD responsibilities list = your bullet writing BLUEPRINT.
+  For EVERY JD responsibility you receive, write AT LEAST ONE bullet in the
+  resume that covers it using the candidate's role context.
+  Example: JD says "Design REST APIs for microservices" →
+    Bullet: "Designed and implemented RESTful APIs for {company} microservices
+             architecture, reducing inter-service latency by ~30%"
+  This is NON-NEGOTIABLE. Every responsibility must map to a bullet.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RULE 1 — KEYWORD CARPET BOMBING (100% coverage target):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  EVERY keyword, skill, tool, and technology from the JD MUST appear
+  somewhere in the resume — in bullets, skills section, or summary.
+  Use EXACT JD spelling: "Node.js" not "nodejs", "REST APIs" not "rest api".
+  Required skills → verbatim in Technical Skills section ALWAYS.
+  Top 10 keywords → embedded in summary.
+  All other keywords → distributed across bullets.
+  There are NO exceptions. A missing keyword = ATS rejection.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RULE 2 — BULLET FORMULA (every bullet, no exceptions):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  [Strong Action Verb] + [what was built/done using JD terms]
+  + [technology from JD] + [number / % / time / scale]
+  Min {min_len} chars, max {max_len} chars.
+  Must contain ≥1 quantifier. Estimate with "~" prefix if needed.
+  BANNED openers: Responsible for / Worked on / Utilized / Helped with
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RULE 3 — VERBATIM KEYWORD MANDATE (ABSOLUTE — NO EXCEPTIONS):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+You will receive a "VERBATIM KEYWORD MANDATE" list in the user message.
+EVERY item on that list MUST appear in your output using EXACT spelling.
+The scoring system uses character-level exact matching after lowercasing.
+"Node.js" scores. "NodeJS" does not. "REST APIs" scores. "RESTful APIs" does not.
+"CI/CD" scores. "CI CD" does not. Use the EXACT string from the mandate list.
+PLACEMENT RULES (must follow for high section weights):
+• Every top-priority term → in summary (first 120 words) AND skills section
+• Every skill/tool/language → in Technical Skills section (exact JD spelling)
+• Tech terms in context → in at least one experience or project bullet
+• Do NOT just list all keywords in one block — distribute them naturally
+• The Technical Skills section is YOUR BEST ATS SCORING OPPORTUNITY —
+include ALL mandate terms that are skills/tools/languages here
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RULE 4 — SKILLS SECTION (verbatim from JD):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Include ALL required_skills, programming_languages, frameworks, tools,
+  databases, cloud_devops_tools from the JD — VERBATIM, EXACT spelling.
+  Group by: Programming Languages | Backend & APIs | Web & UI Development
+            Databases & Data Modelling | Cloud & DevOps | Automation & Tools
+            AI/ML & Data | Mobile Development
+  Target 15-25 skills minimum. Certifications go in their own section.
+  NEVER include: teamwork / communication / analytical skills / problem-solving
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RULE 5 — SUMMARY (70-120 words, keyword-dense):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Line 1: "{JD title} with [X years / pursuing {degree}] specializing in
+           [top 3 JD domains using EXACT JD wording]."
+  Lines 2-3: Embed 8-12 priority JD keywords naturally in 2 sentences.
+  Line 4: "Targeting {company} to deliver [JD core outcome]."
+  Must contain the EXACT target_resume_title from the ATS planner.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RULE 6 — ONE-PAGE FORMAT (Saurav Madake style):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Output section order: Summary → Education → Experience →
+                        Projects → Achievements → Technical Skills
+  Every section must be compact. No paragraph filler. No vague phrases.
+  Achievements = hackathons, prizes, leadership, certifications (one-liners).
+  Technical Skills = grouped, comma-separated, NO bullet points.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RULE 7 — ABSOLUTE PROHIBITIONS:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ✗ Copy old profile bullets verbatim
+  ✗ Invent employers, dates, degrees, or certifications
+  ✗ Leave ANY field null or empty
+  ✗ Return partial JSON or non-JSON
+  ✗ Write soft-skill filler ("team player", "good communicator")
+  ✗ Write "Results-driven Application" (grammar error)
+  ✗ Skip a JD responsibility without writing a bullet for it
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RULE 8 — OUTPUT:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Return ONLY valid JSON matching _ComposedResume schema.
+  No markdown, no code fences, no preamble.
+  Seniority: {seniority}"""
+
+
+def _render_composer_system_prompt(
+    *,
+    min_len: int,
+    max_len: int,
+    min_bullets: int,
+    max_bullets: int,
+    min_sum: int,
+    max_sum: int,
+    seniority: str,
+) -> str:
+    """Render configured prompt tokens without interpreting example braces."""
+    replacements = {
+        "{min_len}": str(min_len),
+        "{max_len}": str(max_len),
+        "{min_bullets}": str(min_bullets),
+        "{max_bullets}": str(max_bullets),
+        "{min_sum}": str(min_sum),
+        "{max_sum}": str(max_sum),
+        "{seniority}": seniority,
+    }
+    rendered = COMPOSER_SYSTEM_PROMPT
+    for token, value in replacements.items():
+        rendered = rendered.replace(token, value)
+    return rendered
 
 
 async def generate_recommendation(
@@ -163,9 +272,12 @@ async def generate_recommendation(
     """
     rejected_ids = rejected_ids or []
     locked_bullets = locked_bullets or {}
-    strategy = None
+    strategy = build_resume_strategy(parsed_jd, profile)
     budget = None
     client = get_gemini_client()
+
+    # ── Pre-step: Enrich thin profiles so AI always has source material ──
+    profile = _enrich_thin_profile(profile, parsed_jd)
 
     # ── Step 1: Relevance Matching ───────────────────────────────────────
     logger.info(f"[{session_id}] Step 1: Relevance matching")
@@ -198,12 +310,13 @@ async def generate_recommendation(
     selected_experience = [e for e in filtered_experience if e.id in top_exp_ids]
     selected_projects = [p for p in filtered_projects if p.id in top_proj_ids]
 
-    composer_system = COMPOSER_SYSTEM_PROMPT.format(
+    composer_system = _render_composer_system_prompt(
         min_len=MIN_BULLET_LENGTH,
         max_len=MAX_BULLET_LENGTH,
         min_bullets=MIN_BULLETS_PER_EXPERIENCE,
         max_bullets=MAX_BULLETS_PER_EXPERIENCE,
-        max_summary=MAX_SUMMARY_WORDS,
+        min_sum=70,
+        max_sum=MAX_SUMMARY_WORDS,
         seniority=parsed_jd.seniority.value,
     )
 
@@ -250,7 +363,25 @@ async def generate_recommendation(
         emphasis=emphasis,
     )
 
-    return recommendation
+    gated = apply_resume_quality_gate(
+        recommendation=recommendation,
+        parsed_jd=parsed_jd,
+        profile=profile,
+        target_pages=target_pages,
+    )
+    strengthened = strengthen_resume_recommendation(
+        recommendation=gated,
+        parsed_jd=parsed_jd,
+        ats_plan=ats_plan,
+        target_pages=target_pages,
+    )
+    fitted = fit_resume_to_page_budget(
+        recommendation=strengthened,
+        parsed_jd=parsed_jd,
+        ats_plan=ats_plan,
+        target_pages=target_pages,
+    )
+    return apply_resume_quality_gate(fitted, parsed_jd, profile, target_pages)
 
 
 # ─── Private helpers ─────────────────────────────────────────────────────────
@@ -273,13 +404,13 @@ def _build_relevance_prompt(
         for p in projects
     )
     # Added skills to relevance matching
-    skills_text = ", ".join(s.name for s in profile_skills[:30])
-    keywords = ", ".join(k.keyword for k in parsed_jd.keywords[:30])
-    planner_keywords = ", ".join((ats_plan.priority_keywords if ats_plan else [])[:30])
+    skills_text = ", ".join(_sanitize_prompt_text(s.name, 120) for s in profile_skills[:30])
+    keywords = ", ".join(_sanitize_prompt_text(k.keyword, 120) for k in parsed_jd.keywords[:30])
+    planner_keywords = ", ".join(_sanitize_prompt_text(v, 120) for v in (ats_plan.priority_keywords if ats_plan else [])[:30])
 
     prompt = f"""Score the relevance of these profile items to the job description.
 
-JOB: {parsed_jd.job_title} at {parsed_jd.company or 'Unknown Company'}
+JOB: {_sanitize_prompt_text(parsed_jd.job_title, 160)} at {_sanitize_prompt_text(parsed_jd.company or 'Unknown Company', 160)}
 SENIORITY: {parsed_jd.seniority.value}
 KEY REQUIREMENTS: {', '.join(parsed_jd.required_skills[:15])}
 JD KEYWORDS: {keywords}
@@ -294,7 +425,7 @@ PROJECTS:
 {proj_text or '(none)'}"""
 
     if emphasis:
-        prompt += f"\n\nUSER EMPHASIS: Prioritize items related to '{emphasis}'."
+        prompt += f"\n\nUSER EMPHASIS: Prioritize items related to '{_sanitize_prompt_text(emphasis, 240)}'."
 
     return prompt
 
@@ -310,105 +441,149 @@ def _build_composer_prompt(
     additional_alignment_text: str | None,
     ats_plan: ATSKeywordPlannerOutput | None = None,
 ) -> str:
-    """Build the prompt for the resume composition step."""
+    """
+    Build the JD-FIRST composer prompt.
+
+    Every experience entry is treated as needs_rewrite=True — bullets are
+    written FROM the JD responsibilities, not copied from the profile.
+    The profile provides: name, company, title, dates, education only.
+    """
+    # ── Experience context (name/company/title/dates only — bullets are rebuilt) ──
     exp_detail = "\n\n".join(
         f"ID: {e.id}\nTitle: {e.title}\nCompany: {e.company}\n"
         f"Dates: {e.start_date} - {e.end_date or 'Present'}\n"
-        f"Original bullets:\n" + "\n".join(f"  • {b}" for b in e.bullets)
+        f"[ALL BULLETS MUST BE REWRITTEN FROM JD — DO NOT COPY THESE]\n"
+        f"Profile bullets (raw reference only):\n"
+        + "\n".join(f"  • {b}" for b in e.bullets)
         for e in experiences
     )
+
     proj_detail = "\n\n".join(
         f"ID: {p.id}\nName: {p.name}\nTech: {', '.join(p.technologies)}\n"
-        f"Original bullets:\n" + "\n".join(f"  • {b}" for b in p.bullets)
+        f"[REWRITE ALL BULLETS USING JD TERMS + PROJECT TECH]\n"
+        f"Profile bullets (raw reference only):\n"
+        + "\n".join(f"  • {b}" for b in p.bullets)
         for p in projects
     )
-    skills = ", ".join(s.name for s in profile.skills[:30])
-    keywords = ", ".join(k.keyword for k in parsed_jd.keywords[:20])
-    planner_keywords = ", ".join((ats_plan.priority_keywords if ats_plan else [])[:35])
-    planner_skills = ", ".join((ats_plan.must_include_skills if ats_plan else [])[:25])
-    planner_tools = ", ".join((ats_plan.must_include_tools_platforms if ats_plan else [])[:20])
-    planner_responsibilities = ", ".join((ats_plan.must_include_responsibilities if ats_plan else [])[:20])
-    planner_themes = " ".join((ats_plan.suggested_summary_themes if ats_plan else [])[:5])
-    style_guidance = " ".join((ats_plan.resume_style_guidance if ats_plan else [])[:5])
-    priority_requirements = [
-        *parsed_jd.required_skills,
-        *[req.text for req in parsed_jd.requirements],
+
+    # ── MASTER KEYWORD LIST — same list the scorer will check ──────────
+    # CRITICAL: these are the EXACT strings the ATS scoring function uses.
+    # The AI must embed each one VERBATIM (exact JD spelling) somewhere in
+    # the resume. Paraphrasing = scorer miss = lower ATS score.
+    master_keywords = build_master_keyword_list(parsed_jd, ats_plan)
+    # Separate into: top-priority (go in summary + skills), regular (skills)
+    priority_set = set()
+    if ats_plan:
+        priority_set = set(kw.casefold() for kw in (
+            ats_plan.priority_keywords[:12] + ats_plan.must_include_skills
+        ))
+    top_keywords = [kw for kw in master_keywords if kw.casefold() in priority_set][:15]
+    all_jd_keywords = master_keywords[:60]
+
+    # JD responsibilities — the bullet BLUEPRINT
+    responsibilities = [
         *parsed_jd.responsibilities,
-    ][:30]
+        *([r for r in ats_plan.must_include_responsibilities] if ats_plan else []),
+    ][:25]
+    resp_numbered = "\n".join(f"  {i+1}. {_sanitize_prompt_text(r, 200)}"
+                              for i, r in enumerate(responsibilities))
 
-    is_obdx_jd = "obdx" in (parsed_jd.job_title or "").lower() or any(
-        "obdx" in (kw.keyword or "").lower() for kw in parsed_jd.keywords
-    )
+    skills_str = ", ".join(_sanitize_prompt_text(s.name, 80) for s in profile.skills[:20])
+    style_guidance = " ".join(_sanitize_prompt_text(v, 200) for v in (ats_plan.resume_style_guidance if ats_plan else [])[:3])
+    summary_themes = " ".join(_sanitize_prompt_text(v, 200) for v in (ats_plan.suggested_summary_themes if ats_plan else [])[:5])
 
-    obdx_guidance = ""
-    if is_obdx_jd:
-        obdx_guidance = """
-OBDX-SPECIFIC GUIDANCE:
-- Target title must include "OBDX Developer" or close variation (e.g., "OBDX Developer", "Oracle OBDX Developer")
-- Summary must include: OBDX, PL/SQL, Java, Microservices, DevOps, UI/UX
-- Technical Skills MUST include: PL/SQL, Java, Microservices, DevOps, Git, Jenkins, UI/UX
-- Experience bullets should emphasize: OBDX installation/deployment, CEMLI development, troubleshooting, Extensibility
-- If JD mentions mobile apps, include iOS/Android in skills and potentially create mobile section
-- UK Open Banking terms should be included if space allows
-- DO NOT copy "Designation:" or other JD labels directly into resume content
-"""
+    prompt = f"""══════════════════════════════════════════════════════════
+JD-FIRST RESUME GENERATION — 100% ATS TARGET
+══════════════════════════════════════════════════════════
 
-    prompt = f"""Create tailored resume content for this job application.
+TARGET JOB TITLE : {_sanitize_prompt_text(parsed_jd.job_title, 160)}
+TARGET COMPANY   : {_sanitize_prompt_text(parsed_jd.company or 'Target Company', 160)}
+SENIORITY        : {getattr(strategy, 'classification', 'experienced')}
+SECTION ORDER    : {', '.join(getattr(strategy, 'section_order', []) or [])}
 
-TARGET JOB: {parsed_jd.job_title}
-COMPANY: {parsed_jd.company or 'Unknown'}
-KEY JD KEYWORDS TO INCLUDE: {keywords}
-ATS PLANNER PRIORITY KEYWORDS: {planner_keywords or '(none)'}
-MUST-INCLUDE SKILLS: {planner_skills or '(none)'}
-MUST-INCLUDE TOOLS/PLATFORMS: {planner_tools or '(none)'}
-MUST-INCLUDE RESPONSIBILITY THEMES: {planner_responsibilities or '(none)'}
-SUMMARY THEMES: {planner_themes or '(none)'}
-STYLE GUIDANCE: {style_guidance or 'Use a clean ATS-friendly format.'}
-REQUIRED SKILLS: {', '.join(parsed_jd.required_skills[:15])}
+══════════════════════════════════════════════════════════
+STEP 1 — BULLET BLUEPRINT (JD RESPONSIBILITIES TO COVER)
+══════════════════════════════════════════════════════════
+You MUST write at least one resume bullet that covers EACH responsibility below.
+Anchor each bullet to the candidate\'s role (use their company/title from the
+experience entries). Use JD language + achievement formula.
 
-CANDIDATE SKILLS: {skills}
+{resp_numbered or '  (No responsibilities listed — derive from JD keywords)'}
 
-ATS ALIGNMENT SIGNALS:
-- Priority JD terms to add or emphasize: {', '.join(priority_requirements) if priority_requirements else '(none)'}
-- Resume strategy note: Generate the strongest ATS-aligned resume for this JD.
+══════════════════════════════════════════════════════════
+STEP 2 — VERBATIM KEYWORD MANDATE (SCORER EXACT-MATCH LIST)
+══════════════════════════════════════════════════════════
+CRITICAL: The ATS scorer uses EXACT string matching after normalization.
+"Node.js" ≠ "nodejs" ≠ "NodeJS". Use the EXACT spelling shown below.
+Every term in this list MUST appear VERBATIM somewhere in your output.
+Do NOT paraphrase. Do NOT abbreviate. Do NOT use synonyms.
+Copy these strings character-for-character into your output.
 
-USER EXTRA CONTEXT:
-{additional_alignment_text or '(none provided)'}
+TOP PRIORITY — must appear in SUMMARY AND Skills section:
+{chr(10).join(f'  • {kw}' for kw in top_keywords) or '  (see full list below)'}
 
-EXPERIENCES TO TAILOR:
-{exp_detail or '(none provided)'}
+FULL VERBATIM LIST — every item must appear in output:
+{', '.join(all_jd_keywords) or '(see JD)'}
 
-PROJECTS TO TAILOR:
-{proj_detail or '(none provided)'}
+INJECTION RULES:
+- Skills/tools/languages → put in Technical Skills section (exact spelling)
+- Frameworks/databases/cloud terms → put in Technical Skills section
+- All top-priority terms → also embed in Professional Summary
+- Do NOT cluster all keywords in one sentence — distribute naturally
 
-ATS ALIGNMENT:
-- Use the ATS keyword planner as the main guide for all content decisions.
-- Use the exact JD title when it is the best ATS headline.
-- Summary MUST include the target JD title and 5-8 priority keywords naturally.
-- Technical Skills must include ALL JD-required skills grouped by category (e.g., "Languages", "Tools", "Platforms").
-- Experience bullets MUST be rewritten to reflect JD responsibilities, not just copied from profile.
-- Projects must be selected and rewritten to match JD relevance.
-- Put the highest-priority ATS planner keywords into the summary and Technical Skills section.
-{obdx_guidance}
-AVOID:
-- Copy-paste directly from JD (rework the meaning, not the words)
-- Grammar errors like "Results-driven Application" (never use as adjective before noun)
-- Repeating keywords unnaturally
-- Copying labels like "Designation:" into resume content
-- Creating fake employers, dates, degrees, or certifications
-- Altering candidate identity/contact details
+══════════════════════════════════════════════════════════
+STEP 3 — CANDIDATE ANCHORING DATA (structure only)
+══════════════════════════════════════════════════════════
+Use these for names, companies, dates, and project tech stacks ONLY.
+Do NOT copy the bullets below — rewrite everything from JD.
 
-Generate:
-1. A tailored job title/headline (clean, no labels like "Designation:")
-2. A professional summary that includes the target title and 5-8 priority keywords
-3. Tailored bullets for each experience (at least 2 bullets per entry, rewrite to highlight JD-relevant achievements)
-4. Tailored bullets for each project (at least 2 bullets per entry)
-5. Organized skill groups with all JD-required skills"""
+EXPERIENCES:
+{exp_detail or '(none — use education/skills context)'}
+
+PROJECTS:
+{proj_detail or '(none)'}
+
+CANDIDATE SKILLS (merge with JD keywords): {skills_str or '(see JD)'}
+EXTRA CONTEXT: {_sanitize_prompt_text(additional_alignment_text or '(none)', 800)}
+SUMMARY THEMES: {summary_themes or '(use top JD keywords)'}
+STYLE: {style_guidance or 'Clean single-column ATS format.'}
+
+══════════════════════════════════════════════════════════
+STEP 4 — GENERATE (follow Rules 0-8 from system prompt)
+══════════════════════════════════════════════════════════
+Produce:
+1. Target title (exact JD title — no labels like "Designation:")
+2. Summary: 70-{MAX_SUMMARY_WORDS} words, exact JD title in sentence 1, 8-12 JD keywords
+3. All experience bullets ({MIN_BULLETS_PER_EXPERIENCE}+ per entry) written from STEP 1 blueprint
+4. All project bullets (3-4 per project) using JD terms + project tech
+5. Technical Skills with ALL items from STEP 2 checklist (verbatim)
+6. Achievements, certifications as present in candidate profile"""
 
     if emphasis:
-        prompt += f"\n\nEMPHASIS: Lean towards '{emphasis}' in your phrasing."
+        prompt += f"\n\nEMPHASIS: '{_sanitize_prompt_text(emphasis, 240)}'"
 
     return prompt
+
+
+_PROMPT_INJECTION_RE = re.compile(
+    r"\b(ignore|disregard|override|forget)\s+(all\s+)?(previous|prior|above|system)\s+(instructions|rules)\b|"
+    r"\b(system prompt|developer message|you are now|act as)\b",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_prompt_text(value: str | None, max_chars: int = 1000) -> str:
+    """Strip obvious prompt-injection phrases because JD/profile text is user supplied."""
+    cleaned = re.sub(r"\s+", " ", value or "").strip()
+    cleaned = _PROMPT_INJECTION_RE.sub("[removed instruction-like text]", cleaned)
+    return cleaned[:max_chars]
+
+
+def _needs_rewrite_entry(bullets: list[str]) -> bool:
+    """Detect weak PDF-ingested bullets so prompts explicitly treat them as raw material."""
+    joined = " ".join(bullets).casefold()
+    weak_phrases = ("basic technical knowledge", "analytical skills", "showcasing", "demonstrating", "responsible for", "worked on")
+    return not bullets or any(phrase in joined for phrase in weak_phrases) or any(len(b.strip()) < MIN_BULLET_LENGTH for b in bullets)
 
 
 def _select_top_items(scores: list[_RelevanceItem], max_count: int) -> set[str]:
@@ -447,9 +622,11 @@ def _clean_composed_resume(
             if cleaned_text:
                 bullet.text = cleaned_text
                 valid_bullets.append(bullet)
-        if len(valid_bullets) >= 2:
+        if len(valid_bullets) >= 1:
             exp.bullets = valid_bullets
             valid_experiences.append(exp)
+        else:
+            logger.warning("Composer dropped experience %s because it returned zero valid bullets", exp.source_id)
     composed.experiences = valid_experiences
 
     valid_projects = []
@@ -461,9 +638,11 @@ def _clean_composed_resume(
             if cleaned_text:
                 bullet.text = cleaned_text
                 valid_bullets.append(bullet)
-        if len(valid_bullets) >= 2:
+        if len(valid_bullets) >= 1:
             project.bullets = valid_bullets
             valid_projects.append(project)
+        else:
+            logger.warning("Composer dropped project %s because it returned zero valid bullets", project.source_id)
     composed.projects = valid_projects
 
     for group in composed.skill_groups:
@@ -569,7 +748,7 @@ def _assemble_recommendation(
     ]
 
     # ── Skills ───────────────────────────────────────────────────────────
-    skill_groups = composed.skill_groups if composed.skill_groups else _default_skill_groups(profile)
+    skill_groups = build_skill_taxonomy(composed.skill_groups, parsed_jd, profile, target_pages=1)
 
     # ── Certifications ───────────────────────────────────────────────────
     cert_entries = [
@@ -581,13 +760,6 @@ def _assemble_recommendation(
         )
         for c in profile.certifications
     ]
-
-    # ── Warnings ─────────────────────────────────────────────────────────
-    warnings = list(relevance.profile_warnings)
-    if relevance.profile_strength == "weak":
-        warnings.insert(0, "⚠️ Your profile is a weak match for this role. Consider adding more relevant experience.")
-    if not experience_entries:
-        warnings.append("⚠️ No work experience matched this job description.")
 
     # ── Contact Info ─────────────────────────────────────────────────────
     contact = ResumeContactInfo(
@@ -610,8 +782,11 @@ def _assemble_recommendation(
         skills=skill_groups,
         projects=project_entries,
         certifications=cert_entries,
+        achievements=_profile_achievements(profile),
+        custom_sections=_profile_custom_sections(profile, parsed_jd),
+        section_order=(build_resume_strategy(parsed_jd, profile).section_order),
         emphasis=emphasis,
-        warnings=warnings,
+        warnings=[],
     )
 
 
@@ -693,3 +868,191 @@ def _default_skill_groups(profile: MasterProfile) -> list[ResumeSkillGroup]:
         cat = skill.category or "Technical Skills"
         groups.setdefault(cat, []).append(skill.name)
     return [ResumeSkillGroup(category=cat, skills=skills) for cat, skills in groups.items()]
+
+
+def _profile_achievements(profile: MasterProfile) -> list[ResumeAchievementEntry]:
+    entries: list[ResumeAchievementEntry] = []
+    seen_titles: set[str] = set()
+
+    def add_entry(entry: ResumeAchievementEntry) -> None:
+        # Deduplicate by title because awards may arrive through both structured and custom sections.
+        key = _clean_text_key(entry.title)
+        if not key or key in seen_titles:
+            return
+        seen_titles.add(key)
+        entries.append(entry)
+
+    for award in profile.awards:
+        add_entry(
+            ResumeAchievementEntry(
+                source_id=award.id,
+                title=award.title,
+                issuer=award.issuer,
+                date=award.date,
+                description=award.description,
+            )
+        )
+    direct_achievements = getattr(profile, "achievements", []) or []
+    for achievement in direct_achievements:
+        title = getattr(achievement, "title", None) or str(achievement)
+        add_entry(ResumeAchievementEntry(
+            source_id=getattr(achievement, "id", f"achievement-{len(entries)}"),
+            title=title,
+            issuer=getattr(achievement, "issuer", None),
+            date=getattr(achievement, "date", None),
+            description=getattr(achievement, "description", None),
+        ))
+    custom_items: list[str] = []
+    for section_name in ("Achievements", "Awards", "Recognition", "Honors"):
+        custom_items.extend(profile.custom_sections.get(section_name, []))
+    for index, item in enumerate(custom_items):
+        cleaned = " ".join(str(item).split()).strip()
+        if cleaned:
+            add_entry(ResumeAchievementEntry(source_id=f"custom-achievement-{index}", title=cleaned))
+    return entries
+
+
+def _profile_custom_sections(profile: MasterProfile, parsed_jd: ParsedJD) -> list[ResumeCustomSection]:
+    """
+    Include ALL non-reserved custom sections unconditionally.
+
+    CHANGED: Removed JD token-matching filter — custom sections (Languages, Tools,
+    Certificates, Achievements, etc.) are ALWAYS included when non-empty.
+    Filtering them out silently made thin resumes even thinner and lowered ATS scores.
+    """
+    reserved = {"certifications", "education", "projects", "experience", "skills"}
+    sections: list[ResumeCustomSection] = []
+    for title, items in profile.custom_sections.items():
+        title_key = title.casefold()
+        if title_key in reserved or title_key in {"achievements", "awards"}:
+            continue
+        cleaned_items = _dedupe_strings([str(item) for item in items])
+        if not cleaned_items:
+            continue
+        sections.append(ResumeCustomSection(title=title, items=cleaned_items))
+    return sections
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        cleaned = " ".join(str(value or "").split()).strip()
+        key = cleaned.casefold()
+        if not cleaned or key in seen:
+            continue
+        seen.add(key)
+        result.append(cleaned)
+    return result
+
+
+def _clean_text_key(value: str | None) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
+
+
+# ─── Profile Enrichment (Always-Generate) ────────────────────────────────────
+
+def _enrich_thin_profile(profile: MasterProfile, parsed_jd: ParsedJD) -> MasterProfile:
+    """
+    Enrich a thin/empty profile so the AI composer always has source material.
+
+    Strategy (answers Q1 + Q5 from architecture review):
+    - Work experience empty → synthesise from skills + education + projects + certs + achievements.
+    - Skills empty → inject from JD required_skills + project technologies (Q5: A+B combined).
+    - Does NOT invent employers, dates, degrees, or certifications.
+    - All generated entries are flagged needs_rewrite=True so the AI rewrites them entirely.
+    """
+    from app.schemas.profile import WorkExperience, Skill
+    import uuid
+
+    updates: dict = {}
+
+    # ── Enrich skills first (needed by experience synthesis below) ───────
+    enriched_skills = list(profile.skills)
+    existing_skill_names = {s.name.casefold() for s in enriched_skills}
+
+    # Q5-A: infer skills from project technologies
+    for project in profile.projects:
+        for tech in project.technologies:
+            if tech.casefold() not in existing_skill_names and tech.strip():
+                enriched_skills.append(Skill(name=tech))
+                existing_skill_names.add(tech.casefold())
+
+    # Q5-B: inject JD required_skills and programming_languages not already present
+    jd_skills_to_inject = [
+        *parsed_jd.required_skills,
+        *parsed_jd.programming_languages,
+        *parsed_jd.frameworks[:8],
+        *parsed_jd.databases[:6],
+        *parsed_jd.tools_platforms[:8],
+        *parsed_jd.cloud_devops_tools[:8],
+    ]
+    for skill_name in jd_skills_to_inject:
+        clean = skill_name.strip()
+        if clean and clean.casefold() not in existing_skill_names:
+            enriched_skills.append(Skill(name=clean))
+            existing_skill_names.add(clean.casefold())
+
+    if enriched_skills != list(profile.skills):
+        updates["skills"] = enriched_skills
+
+    # ── Synthesise experience when work_experience is empty ──────────────
+    if not profile.work_experience:
+        logger.info(
+            "Profile has no work experience — synthesising entry from skills + education + JD context."
+        )
+        # Build a descriptive context from all available profile material.
+        skill_names = [s.name for s in enriched_skills[:15]]
+        edu_context = ""
+        if profile.education:
+            edu = profile.education[0]
+            edu_context = f"{edu.degree} in {edu.field_of_study or 'the relevant field'} at {edu.institution}"
+        cert_names = [c.name for c in profile.certifications[:3]]
+        award_titles = [a.title for a in profile.awards[:3]]
+
+        # Construct a rich description from all available material so the
+        # AI has real context to derive bullets from — not a blank slate.
+        description_parts = []
+        if edu_context:
+            description_parts.append(f"Candidate pursuing {edu_context}.")
+        if skill_names:
+            description_parts.append(f"Skills: {', '.join(skill_names)}.")
+        if cert_names:
+            description_parts.append(f"Certifications: {', '.join(cert_names)}.")
+        if award_titles:
+            description_parts.append(f"Awards/Achievements: {', '.join(award_titles)}.")
+        if profile.projects:
+            proj_names = [p.name for p in profile.projects[:3]]
+            description_parts.append(f"Projects: {', '.join(proj_names)}.")
+
+        description = " ".join(description_parts) or f"Candidate targeting {parsed_jd.job_title} role."
+
+        synthetic_exp = WorkExperience(
+            id=f"synthetic-exp-{uuid.uuid4().hex[:8]}",
+            company="Academic / Project-Based Experience",
+            title=parsed_jd.job_title or "Software Developer",
+            location=None,
+            start_date="2022-01",
+            end_date=None,
+            is_current=True,
+            description=description,
+            bullets=[],          # AI will write all bullets from the description + JD
+            needs_rewrite=True,
+        )
+        updates["work_experience"] = [synthetic_exp]
+
+    # ── Mark ALL existing empty-bullet entries for rewrite ───────────────
+    if profile.work_experience and "work_experience" not in updates:
+        rewritten = []
+        for exp in profile.work_experience:
+            if not exp.bullets or all(len(b.strip()) < 40 for b in exp.bullets):
+                rewritten.append(exp.model_copy(update={"needs_rewrite": True}))
+            else:
+                rewritten.append(exp)
+        if rewritten != list(profile.work_experience):
+            updates["work_experience"] = rewritten
+
+    if not updates:
+        return profile
+
+    return profile.model_copy(update=updates)

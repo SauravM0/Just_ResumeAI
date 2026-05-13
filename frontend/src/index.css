@@ -427,6 +427,53 @@ a:hover {
   color: var(--text-tertiary);
 }
 
+.compact-settings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  margin: 0 0 var(--space-lg);
+}
+
+.compact-setting {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+  min-height: 36px;
+  padding: 7px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-glass);
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.compact-setting input {
+  accent-color: var(--accent-primary);
+}
+
+.compact-setting-disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.generation-status {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-sm);
+  padding: var(--space-md);
+  border: 1px solid var(--border-accent);
+  border-radius: var(--radius-md);
+  background: var(--accent-gradient-soft);
+  color: var(--text-primary);
+}
+
+.generation-status p {
+  margin: 4px 0 0;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}
+
 /* ─── Score Cards ────────────────────────────────────────────────────────── */
 .score-card {
   background: var(--bg-card);
@@ -870,6 +917,21 @@ a:hover {
   flex-direction: column;
 }
 
+.fast-console-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: var(--space-lg);
+  align-items: start;
+}
+
+.fast-console-side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  position: sticky;
+  top: 128px;
+}
+
 .pdf-preview {
   flex: 1;
   background: white;
@@ -923,6 +985,12 @@ a:hover {
   }
   .split-pane {
     grid-template-columns: 1fr;
+  }
+  .fast-console-layout {
+    grid-template-columns: 1fr;
+  }
+  .fast-console-side {
+    position: static;
   }
 }
 

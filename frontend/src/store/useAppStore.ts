@@ -9,7 +9,7 @@ import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import type { ParsedJD } from '../types/jd';
 import type { ATSAlignmentReport } from '../types/alignment';
-import type { ResumeRecommendation, ATSScore, EligibilityResult, PipelinePdfResult } from '../types/resume';
+import type { ResumeRecommendation, ATSScore, PipelinePdfResult } from '../types/resume';
 import type { MasterProfile } from '../types/profile';
 
 export type AppStep =
@@ -40,7 +40,7 @@ interface AppState {
 
   // ATS score (set after validation)
   atsScore: ATSScore | null;
-  setAtsScore: (score: ATSScore) => void;
+  setAtsScore: (score: ATSScore | null) => void;
 
   alignmentReport: ATSAlignmentReport | null;
   setAlignmentReport: (report: ATSAlignmentReport | null) => void;
@@ -49,9 +49,7 @@ interface AppState {
   latexSource: string | null;
   setLatexSource: (src: string) => void;
 
-  // Eligibility and PDF pipeline metadata
-  eligibility: EligibilityResult | null;
-  setEligibility: (eligibility: EligibilityResult | null) => void;
+  // PDF pipeline metadata
   pipelinePdf: PipelinePdfResult | null;
   setPipelinePdf: (pdf: PipelinePdfResult | null) => void;
 
@@ -59,13 +57,9 @@ interface AppState {
   activeProfile: MasterProfile | null;
   setActiveProfile: (profile: MasterProfile | null) => void;
 
-  // Pipeline warnings
-  warnings: string[];
-  addWarning: (w: string) => void;
-  clearWarnings: () => void;
-
   // Reset for new session
   resetSession: () => void;
+  resetJobSession: () => void;
 }
 
 export const useAppStore = create<AppState>()(
@@ -92,17 +86,11 @@ export const useAppStore = create<AppState>()(
       latexSource: null,
       setLatexSource: (src) => set({ latexSource: src }),
 
-      eligibility: null,
-      setEligibility: (eligibility) => set({ eligibility }),
       pipelinePdf: null,
       setPipelinePdf: (pdf) => set({ pipelinePdf: pdf }),
 
       activeProfile: null,
       setActiveProfile: (profile) => set({ activeProfile: profile }),
-
-      warnings: [],
-      addWarning: (w) => set((state) => ({ warnings: [...state.warnings, w] })),
-      clearWarnings: () => set({ warnings: [] }),
 
       resetSession: () =>
         set({
@@ -112,11 +100,20 @@ export const useAppStore = create<AppState>()(
           atsScore: null,
           alignmentReport: null,
           latexSource: null,
-          eligibility: null,
           pipelinePdf: null,
           activeProfile: null,
-          warnings: [],
           currentStep: 'dashboard',
+        }),
+      resetJobSession: () =>
+        set({
+          sessionId: null,
+          parsedJD: null,
+          recommendation: null,
+          atsScore: null,
+          alignmentReport: null,
+          latexSource: null,
+          pipelinePdf: null,
+          currentStep: 'jd-input',
         }),
     }),
     {
@@ -130,9 +127,7 @@ export const useAppStore = create<AppState>()(
         atsScore: state.atsScore,
         alignmentReport: state.alignmentReport,
         latexSource: state.latexSource,
-        eligibility: state.eligibility,
         pipelinePdf: state.pipelinePdf,
-        warnings: state.warnings,
       }),
     }
   )

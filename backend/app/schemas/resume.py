@@ -116,6 +116,21 @@ class ResumeCertEntry(BaseModel):
     included: bool = True
 
 
+class ResumeAchievementEntry(BaseModel):
+    source_id: str
+    title: str
+    issuer: Optional[str] = None
+    date: Optional[str] = None
+    description: Optional[str] = None
+    included: bool = True
+
+
+class ResumeCustomSection(BaseModel):
+    title: str
+    items: list[str] = Field(default_factory=list)
+    included: bool = True
+
+
 # ─── Contact Info for Rendering ──────────────────────────────────────────────
 
 class ResumeContactInfo(BaseModel):
@@ -145,6 +160,10 @@ class ResumeRecommendation(BaseModel):
     skills: list[ResumeSkillGroup] = Field(default_factory=list)
     projects: list[ResumeProjectEntry] = Field(default_factory=list)
     certifications: list[ResumeCertEntry] = Field(default_factory=list)
+    achievements: list[ResumeAchievementEntry] = Field(default_factory=list)
+    awards: list[ResumeAchievementEntry] = Field(default_factory=list)
+    custom_sections: list[ResumeCustomSection] = Field(default_factory=list)
+    section_order: list[str] = Field(default_factory=list)
 
     # Metadata
     emphasis: Optional[str] = Field(
@@ -152,7 +171,7 @@ class ResumeRecommendation(BaseModel):
     )
     warnings: list[str] = Field(
         default_factory=list,
-        description="Warnings about weak profile match, missing experience, etc."
+        description="Non-blocking system warnings for generation fallback or rendering issues."
     )
 
 
@@ -221,6 +240,12 @@ class ResumeRenderLatexResponse(BaseModel):
 class ResumeRenderPdfRequest(BaseModel):
     """POST /api/v1/resume/render-pdf"""
     session_id: str
+
+
+class ResumeCompileLatexSourceRequest(BaseModel):
+    """POST /api/v1/resume/compile-latex-source"""
+    session_id: str
+    latex_source: str = Field(..., min_length=1)
 
 
 class ResumeApproveGeneratePdfRequest(BaseModel):

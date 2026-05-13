@@ -67,6 +67,21 @@ export interface ResumeCertEntry {
   included: boolean;
 }
 
+export interface ResumeAchievementEntry {
+  source_id: string;
+  title: string;
+  issuer?: string;
+  date?: string;
+  description?: string;
+  included: boolean;
+}
+
+export interface ResumeCustomSection {
+  title: string;
+  items: string[];
+  included: boolean;
+}
+
 export interface ResumeContactInfo {
   full_name: string;
   email: string;
@@ -87,6 +102,10 @@ export interface ResumeRecommendation {
   skills: ResumeSkillGroup[];
   projects: ResumeProjectEntry[];
   certifications: ResumeCertEntry[];
+  achievements: ResumeAchievementEntry[];
+  awards: ResumeAchievementEntry[];
+  custom_sections: ResumeCustomSection[];
+  section_order: string[];
   emphasis?: string;
   warnings: string[];
 }
@@ -194,6 +213,11 @@ export interface RenderPdfRequest {
   session_id: string;
 }
 
+export interface CompileLatexSourceRequest {
+  session_id: string;
+  latex_source: string;
+}
+
 export interface ApproveGeneratePdfRequest {
   session_id: string;
   recommendation: ResumeRecommendation;
@@ -223,6 +247,9 @@ export interface ApproveGeneratePdfResponse {
 export type EligibilityStatus = 'match' | 'partial_match' | 'hard_mismatch';
 export type PipelineStepState = 'pending' | 'success' | 'failed' | 'skipped';
 
+/**
+ * @deprecated Compatibility-only response field. The MVP does not display or gate on eligibility.
+ */
 export interface EligibilityResult {
   status: EligibilityStatus;
   blocking_issues: string[];

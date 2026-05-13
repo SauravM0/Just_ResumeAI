@@ -13,17 +13,16 @@ def escape_latex(text: str) -> str:
     """
     Escape LaTeX special characters in user-provided text.
     Order matters: backslash must be escaped first to avoid double-escaping.
+    Handles: & % $ # _ { } ~ ^ \\
     """
     if not text:
         return ""
 
-    # Backslash first (before we introduce more backslashes)
     text = text.replace("\\", r"\textbackslash{}")
 
     for char in LATEX_SPECIAL_CHARS:
         text = text.replace(char, f"\\{char}")
 
-    # Handle tilde and caret separately (they need special LaTeX commands)
     text = text.replace("\\~", r"\textasciitilde{}")
     text = text.replace("\\^", r"\textasciicircum{}")
 

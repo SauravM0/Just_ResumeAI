@@ -1,11 +1,11 @@
 /**
- * LaTeX Editor page — view/edit LaTeX source + PDF preview/export.
+ * Advanced LaTeX editor — edit raw LaTeX source and compile a PDF.
  */
 
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useMutation } from '@tanstack/react-query';
-import { renderPdf } from '../lib/api';
+import { compileLatexSource } from '../lib/api';
 import { useAppStore } from '../store/useAppStore';
 
 function toBackendUrl(path: string): string {
@@ -18,14 +18,15 @@ export default function LatexEditor() {
   const { sessionId, latexSource, setLatexSource, pipelinePdf, setPipelinePdf } = useAppStore();
   const [pdfUrl, setPdfUrl] = useState<string | null>(
     pipelinePdf?.compile_success && pipelinePdf.pdf_url
-      ? `${toBackendUrl(pipelinePdf.pdf_url)}?t=${Date.now()}`
+      ? toBackendUrl(pipelinePdf.pdf_url)
       : null,
   );
   const [compileErrors, setCompileErrors] = useState<string[]>([]);
 
   const compileMutation = useMutation({
-    mutationFn: renderPdf,
+    mutationFn: compileLatexSource,
     onSuccess: (data) => {
+      setLatexSource(data.latex_source || latexSource || '');
       if (data.compile_success) {
         setPdfUrl(`${toBackendUrl(data.pdf_url)}?t=${Date.now()}`);
         setPipelinePdf({
@@ -72,6 +73,7 @@ export default function LatexEditor() {
     if (!sessionId || !latexSource) return;
     compileMutation.mutate({
       session_id: sessionId,
+      latex_source: latexSource,
     });
   };
 
@@ -113,9 +115,9 @@ export default function LatexEditor() {
     <div className="animate-fade-in">
       <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <div>
-          <h1 className="page-title">LaTeX Editor & PDF Preview</h1>
+          <h1 className="page-title">Advanced LaTeX Editor</h1>
           <p className="page-subtitle">
-            Review the generated LaTeX source. Your approved PDF is shown on the right when available.
+            Advanced editing only. Most users do not need this.
           </p>
         </div>
         <div style={{ display: 'flex', gap: 'var(--space-sm)' }}>
@@ -130,15 +132,9 @@ export default function LatexEditor() {
         </div>
       </div>
 
-      {/* Pipeline */}
-      <div className="pipeline-steps" style={{ marginBottom: 'var(--space-lg)' }}>
-        <div className="pipeline-step step-done"><span>✓</span><span>Profile</span></div>
-        <div className="pipeline-connector" />
-        <div className="pipeline-step step-done"><span>✓</span><span>JD Analysis</span></div>
-        <div className="pipeline-connector" />
-        <div className="pipeline-step step-done"><span>✓</span><span>Review</span></div>
-        <div className="pipeline-connector" />
-        <div className="pipeline-step step-active"><span>📑</span><span>LaTeX / PDF</span></div>
+      <div className="warning-banner warning-info" style={{ marginBottom: 'var(--space-lg)' }}>
+        <span>Advanced</span>
+        <span>Use this only if you need to manually repair LaTeX. The normal resume output page can generate PDFs without opening this editor.</span>
       </div>
 
       {/* Compile Errors */}
@@ -170,7 +166,7 @@ export default function LatexEditor() {
             spellCheck={false}
           />
           <p style={{ marginTop: 'var(--space-sm)', color: 'var(--text-tertiary)', fontSize: '0.8rem' }}>
-            PDF compilation uses the last server-rendered LaTeX stored for this session. Local edits in this textbox are not compiled in this phase.
+            Compile PDF uses the edited LaTeX currently shown in this textbox.
           </p>
         </div>
 

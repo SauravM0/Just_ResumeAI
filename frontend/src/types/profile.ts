@@ -34,6 +34,7 @@ export interface WorkExperience {
   is_current: boolean;
   description?: string;
   bullets: string[];
+  needs_rewrite?: boolean;
   tags: string[];
 }
 
@@ -57,6 +58,7 @@ export interface Project {
   url?: string;
   technologies: string[];
   bullets: string[];
+  needs_rewrite?: boolean;
   start_date?: string;
   end_date?: string;
 }

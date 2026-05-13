@@ -28,7 +28,6 @@ function AppLayout() {
     { path: '/profile', icon: '👤', label: 'Master Profile' },
     { path: '/jd', icon: '📋', label: 'Job Description' },
     { path: '/review', icon: '👁️', label: 'Resume Review', requiresSession: true },
-    { path: '/editor', icon: '📑', label: 'LaTeX Editor', requiresSession: true },
     { path: '/cover-letter', icon: '✉️', label: 'Cover Letter', requiresSession: true },
   ];
 

@@ -1,66 +1,122 @@
 /**
- * Resume Review page — the human-in-the-loop review interface.
+ * Fast resume output console.
  *
- * User can:
- * - Accept/reject experiences, projects, certifications
- * - Edit, lock, or reject individual bullets
- * - Regenerate with different emphasis
- * - See ATS score, keyword coverage, readability score
- * - See warnings for weak JD / weak profile
+ * Users can copy, lightly edit, optimize, export, and move to the next JD
+ * without approving individual bullets.
  */
 
-import { useState, useCallback, useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useMutation } from '@tanstack/react-query';
-import { approveGeneratePdf, recommendResume, regenerateResume, validateResume } from '../lib/api';
-import AlignmentMetricsPanel from '../components/AlignmentMetricsPanel';
-import { getDefaultProfile } from '../lib/db';
+import ATSCompactScoreCard from '../components/ATSCompactScoreCard';
+import { approveGeneratePdf, exportResumeDocx, generateCoverLetter, regenerateResume, validateResume } from '../lib/api';
+import { getDefaultProfile, saveRecentResumeSnapshot } from '../lib/db';
 import { sanitizeProfile } from '../lib/profile';
+import {
+  recommendationSkillsToText,
+  recommendationSummaryToText,
+  recommendationToMarkdown,
+  recommendationToPlainText,
+} from '../lib/resumeText';
 import { useAppStore } from '../store/useAppStore';
 import type {
-  ResumeExperienceEntry,
-  ResumeProjectEntry,
-  ResumeBullet,
-  BulletStatus,
   ApproveGeneratePdfRequest,
   ApproveGeneratePdfResponse,
+  ResumeBullet,
+  ResumeExperienceEntry,
+  ResumeProjectEntry,
+  ResumeRecommendation,
   ResumeRecommendResponse,
 } from '../types/resume';
 import type { MasterProfile } from '../types/profile';
+import type { ReactNode } from 'react';
 
 function hasSavedProfile(profile: MasterProfile | null): profile is MasterProfile {
   return Boolean(profile?.contact.full_name?.trim());
 }
 
-type ReviewSection = 'experience' | 'projects';
+function toBackendUrl(path: string): string {
+  const baseUrl = import.meta.env.VITE_API_BASE?.replace('/api/v1', '') || 'http://localhost:8000';
+  return `${baseUrl}${path}`;
+}
 
 function updateEntryBullet<T extends ResumeExperienceEntry | ResumeProjectEntry>(
   entry: T,
   bulletIndex: number,
-  updater: (bullet: ResumeBullet) => ResumeBullet,
+  text: string,
 ): T {
   const bullets = [...entry.bullets];
-  bullets[bulletIndex] = updater(bullets[bulletIndex]);
+  bullets[bulletIndex] = {
+    ...bullets[bulletIndex],
+    text,
+    status: 'edited',
+  };
   return { ...entry, bullets };
 }
 
+function includedBulletsWithIndex(bullets: ResumeBullet[]): Array<{ bullet: ResumeBullet; index: number }> {
+  return bullets
+    .map((bullet, index) => ({ bullet, index }))
+    .filter(({ bullet }) => bullet.status !== 'rejected');
+}
+
+function dedupeKeywords(values: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+
+  values.forEach((value) => {
+    const cleaned = value.trim();
+    const key = cleaned.toLowerCase();
+    if (!cleaned || seen.has(key)) return;
+    seen.add(key);
+    result.push(cleaned);
+  });
+
+  return result;
+}
+
+function keywordInstruction(keywords: string[]): string {
+  return [
+    `Naturally include these high-priority JD keywords: ${keywords.join(', ')}.`,
+    'Prefer the target title, summary, technical skills, and top experience bullets.',
+    'Keep the resume one page, avoid keyword stuffing, and do not copy JD phrasing awkwardly.',
+  ].join(' ');
+}
+
 export default function ResumeReview() {
-const navigate = useNavigate();
+  const navigate = useNavigate();
   const {
-    sessionId, parsedJD, recommendation, setRecommendation,
-    atsScore, setAtsScore, latexSource, setLatexSource, setPipelinePdf, setStep,
-    setActiveProfile, pipelinePdf, setAlignmentReport, alignmentReport,
+    sessionId,
+    parsedJD,
+    recommendation,
+    setRecommendation,
+    atsScore,
+    setAtsScore,
+    alignmentReport,
+    latexSource,
+    setLatexSource,
+    pipelinePdf,
+    setPipelinePdf,
+    setStep,
+    activeProfile,
+    setActiveProfile,
+    setAlignmentReport,
+    resetJobSession,
   } = useAppStore();
 
-  const [emphasis, setEmphasis] = useState('');
-  const [additionalContext, setAdditionalContext] = useState('');
-  const [activeTab, setActiveTab] = useState<'experience' | 'projects' | 'skills' | 'scores'>('experience');
-  const [resolvedProfile, setResolvedProfile] = useState<MasterProfile | null>(null);
+  const [focusKeywords, setFocusKeywords] = useState('');
+  const [resolvedProfile, setResolvedProfile] = useState<MasterProfile | null>(activeProfile);
   const [isCheckingProfile, setIsCheckingProfile] = useState(false);
   const [blockingError, setBlockingError] = useState<string | null>(null);
   const [renderError, setRenderError] = useState<string | null>(null);
+  const [compileErrors, setCompileErrors] = useState<string[]>([]);
+  const [compileWarnings, setCompileWarnings] = useState<string[]>([]);
+  const [pdflatexExcerpt, setPdflatexExcerpt] = useState<string | null>(null);
+  const [compileLineNumber, setCompileLineNumber] = useState<number | null>(null);
+  const [copyStatus, setCopyStatus] = useState<string | null>(null);
+  const [coverLetterStatus, setCoverLetterStatus] = useState<string | null>(null);
+  const [coverLetterText, setCoverLetterText] = useState('');
 
-  // Resolve the saved profile from IndexedDB before allowing recommendation.
   useEffect(() => {
     let cancelled = false;
 
@@ -74,6 +130,11 @@ const navigate = useNavigate();
       if (!parsedJD) {
         setResolvedProfile(null);
         setBlockingError('Missing parsed JD. Please analyze the JD again.');
+        return;
+      }
+
+      if (activeProfile) {
+        setResolvedProfile(activeProfile);
         return;
       }
 
@@ -95,9 +156,7 @@ const navigate = useNavigate();
         setResolvedProfile(normalizedProfile);
         setActiveProfile(normalizedProfile);
       } finally {
-        if (!cancelled) {
-          setIsCheckingProfile(false);
-        }
+        if (!cancelled) setIsCheckingProfile(false);
       }
     }
 
@@ -106,36 +165,33 @@ const navigate = useNavigate();
     return () => {
       cancelled = true;
     };
-  }, [sessionId, parsedJD, setActiveProfile]);
+  }, [activeProfile, parsedJD, sessionId, setActiveProfile]);
 
-  // ── Generate recommendation on mount if needed ─────────────────────────
-  const recommendMutation = useMutation({
-    mutationFn: recommendResume,
-    onSuccess: (data) => setRecommendation(data.recommendation),
-  });
+  const pdfUrl = pipelinePdf?.compile_success && pipelinePdf.pdf_url
+    ? toBackendUrl(pipelinePdf.pdf_url)
+    : null;
 
-  const regenerateMutation = useMutation({
-    mutationFn: regenerateResume,
-    onSuccess: (data: ResumeRecommendResponse) => {
-      setRecommendation(data.recommendation);
-      if (data.alignment_report) {
-        setAlignmentReport(data.alignment_report);
-      }
-    },
-  });
-
-  const validateMutation = useMutation({
-    mutationFn: validateResume,
-    onSuccess: (data) => setAtsScore(data.ats_score),
-  });
+  const saveCurrentResume = async (overrides?: {
+    pipelinePdf?: typeof pipelinePdf;
+    coverLetterText?: string;
+  }) => {
+    if (!sessionId || !recommendation) return;
+    await saveRecentResumeSnapshot({
+      sessionId,
+      parsedJD,
+      recommendation,
+      atsScore,
+      pipelinePdf: overrides?.pipelinePdf ?? pipelinePdf,
+      coverLetterText: overrides?.coverLetterText ?? coverLetterText,
+    });
+  };
 
   const approvePdfMutation = useMutation<ApproveGeneratePdfResponse, Error, ApproveGeneratePdfRequest>({
     mutationFn: approveGeneratePdf,
     onSuccess: (data) => {
+      setLatexSource(data.latex_source || '');
       if (data.compile_success) {
-        setRenderError(null);
-        setLatexSource(data.latex_source);
-        setPipelinePdf({
+        const nextPdf = {
           requested: true,
           compile_success: true,
           pdf_url: data.pdf_url,
@@ -144,65 +200,223 @@ const navigate = useNavigate();
           generated_tex_path: data.generated_tex_path,
           pdflatex_excerpt: data.pdflatex_excerpt,
           line_number: data.line_number,
-        });
-        setStep('latex-editor');
-        navigate('/editor');
+        };
+        setRenderError(null);
+        setCompileErrors([]);
+        setCompileWarnings([]);
+        setPdflatexExcerpt(null);
+        setCompileLineNumber(null);
+        setPipelinePdf(nextPdf);
+        void saveCurrentResume({ pipelinePdf: nextPdf });
         return;
       }
 
-      setLatexSource(data.latex_source || '');
+      const errors = data.compile_errors || ['PDF compilation failed.'];
+      const warnings = data.compile_warnings || [];
       setPipelinePdf({
         requested: true,
         compile_success: false,
         pdf_url: undefined,
-        compile_errors: data.compile_errors || ['PDF compilation failed.'],
-        compile_warnings: data.compile_warnings || [],
+        compile_errors: errors,
+        compile_warnings: warnings,
         generated_tex_path: data.generated_tex_path,
         pdflatex_excerpt: data.pdflatex_excerpt,
         line_number: data.line_number,
       });
-      setRenderError((data.compile_errors || ['PDF compilation failed.']).join('; '));
+      setRenderError('PDF generation failed, but your resume content is safe. Try Optimize Again or open Advanced LaTeX Editor.');
+      setCompileErrors(errors);
+      setCompileWarnings(warnings);
+      setPdflatexExcerpt(data.pdflatex_excerpt ?? null);
+      setCompileLineNumber(data.line_number ?? null);
     },
     onError: (error) => {
-      setRenderError(error.message || 'PDF generation failed. Please try again.');
+      setRenderError('PDF generation failed, but your resume content is safe. Try Optimize Again or open Advanced LaTeX Editor.');
+      setCompileErrors([error.message || 'PDF generation failed. Please try again.']);
+      setCompileWarnings([]);
+      setPdflatexExcerpt(null);
+      setCompileLineNumber(null);
     },
   });
 
-  // ── Handlers ───────────────────────────────────────────────────────────
-  const getRejectedIds = useCallback((): string[] => {
-    if (!recommendation) return [];
-    const rejected: string[] = [];
-    recommendation.experience.forEach((e) => { if (!e.included) rejected.push(e.source_id); });
-    recommendation.projects.forEach((p) => { if (!p.included) rejected.push(p.source_id); });
-    return rejected;
-  }, [recommendation]);
+  const validateMutation = useMutation({
+    mutationFn: validateResume,
+    onSuccess: (data) => setAtsScore(data.ats_score),
+  });
 
-  const getLockedBulletIds = useCallback((): string[] => {
-    if (!recommendation) return [];
-    const locked: string[] = [];
-    recommendation.experience.forEach((e) => e.bullets.forEach((b) => { if (b.status === 'locked') locked.push(b.id); }));
-    recommendation.projects.forEach((p) => p.bullets.forEach((b) => { if (b.status === 'locked') locked.push(b.id); }));
-    return locked;
-  }, [recommendation]);
+  const regenerateMutation = useMutation({
+    mutationFn: regenerateResume,
+    onSuccess: (data: ResumeRecommendResponse) => {
+      setRecommendation(data.recommendation);
+      setAtsScore(null);
+      setPipelinePdf(null);
+      setRenderError(null);
+      setCoverLetterText('');
+      if (data.alignment_report) setAlignmentReport(data.alignment_report);
+      if (sessionId) {
+        validateMutation.mutate({
+          session_id: sessionId,
+          recommendation: data.recommendation,
+        });
+      }
+      setFocusKeywords('');
+    },
+  });
 
-  const handleRegenerate = () => {
-    if (!sessionId || !parsedJD || !resolvedProfile) return;
+  const coverLetterMutation = useMutation({
+    mutationFn: generateCoverLetter,
+    onSuccess: (data) => {
+      setCoverLetterText(data.cover_letter_text);
+      setCoverLetterStatus('Cover letter ready');
+      void saveCurrentResume({ coverLetterText: data.cover_letter_text });
+      window.setTimeout(() => setCoverLetterStatus(null), 2000);
+    },
+    onError: (error) => {
+      setCoverLetterStatus(error instanceof Error ? error.message : 'Cover letter generation failed.');
+    },
+  });
+
+  const docxMutation = useMutation({
+    mutationFn: exportResumeDocx,
+    onSuccess: (blob) => {
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'resume.docx';
+      link.click();
+      URL.revokeObjectURL(url);
+      setCopyStatus('DOCX ready');
+      window.setTimeout(() => setCopyStatus(null), 2000);
+    },
+    onError: (error) => {
+      setRenderError(error instanceof Error ? error.message : 'DOCX export failed.');
+    },
+  });
+
+  const commitRecommendation = (next: ResumeRecommendation) => {
+    setRecommendation(next);
+    setPipelinePdf(null);
+    setRenderError(null);
+    setCompileErrors([]);
+    setCompileWarnings([]);
+    setPdflatexExcerpt(null);
+    setCompileLineNumber(null);
+    setCoverLetterText('');
+  };
+
+  const handleSummaryChange = (summary: string) => {
+    if (!recommendation) return;
+    commitRecommendation({ ...recommendation, summary });
+  };
+
+  const handleExperienceBulletChange = (entryIndex: number, bulletIndex: number, text: string) => {
+    if (!recommendation) return;
+    const experience = [...recommendation.experience];
+    experience[entryIndex] = updateEntryBullet(experience[entryIndex], bulletIndex, text);
+    commitRecommendation({ ...recommendation, experience });
+  };
+
+  const handleProjectBulletChange = (entryIndex: number, bulletIndex: number, text: string) => {
+    if (!recommendation) return;
+    const projects = [...recommendation.projects];
+    projects[entryIndex] = updateEntryBullet(projects[entryIndex], bulletIndex, text);
+    commitRecommendation({ ...recommendation, projects });
+  };
+
+  const copyToClipboard = async (value: string, label: string) => {
+    if (!value.trim()) return;
+    await navigator.clipboard.writeText(value);
+    setCopyStatus(`${label} copied`);
+    window.setTimeout(() => setCopyStatus(null), 2000);
+  };
+
+  const handleCopyResume = () => {
+    if (!recommendation) return;
+    void copyToClipboard(recommendationToPlainText(recommendation), 'Resume');
+  };
+
+  const handleCopyMarkdown = () => {
+    if (!recommendation) return;
+    void copyToClipboard(recommendationToMarkdown(recommendation), 'Markdown resume');
+  };
+
+  const handleCopySummary = () => {
+    if (!recommendation) return;
+    void copyToClipboard(recommendationSummaryToText(recommendation), 'Summary');
+  };
+
+  const handleCopySkills = () => {
+    if (!recommendation) return;
+    void copyToClipboard(recommendationSkillsToText(recommendation), 'Skills');
+  };
+
+  const handleGeneratePdf = () => {
+    if (!sessionId || !recommendation) return;
+    setRenderError(null);
+    setCompileErrors([]);
+    setCompileWarnings([]);
+    setPdflatexExcerpt(null);
+    setCompileLineNumber(null);
+    approvePdfMutation.mutate({ session_id: sessionId, recommendation });
+  };
+
+  const handleExportDocx = () => {
+    if (!sessionId || !recommendation) return;
+    setRenderError(null);
+    docxMutation.mutate({ session_id: sessionId, recommendation });
+  };
+
+  const handleDownloadPdf = () => {
+    if (pdfUrl) window.open(pdfUrl, '_blank');
+  };
+
+  const handleOptimizeAgain = () => {
+    if (!sessionId || !resolvedProfile || !focusKeywords.trim()) return;
     regenerateMutation.mutate({
       session_id: sessionId,
       profile: resolvedProfile,
-      emphasis: emphasis || undefined,
-      additional_alignment_text: additionalContext || undefined,
-      locked_bullet_ids: getLockedBulletIds(),
-      rejected_item_ids: getRejectedIds(),
+      emphasis: focusKeywords.trim(),
+      additional_alignment_text: keywordInstruction([focusKeywords.trim()]),
+      locked_bullet_ids: [],
+      rejected_item_ids: [],
     });
   };
 
-const handleValidate = () => {
-    if (!sessionId || !recommendation || !parsedJD) return;
-    validateMutation.mutate({
+  const handleAddMissingKeywords = (keywords: string[]) => {
+    if (!sessionId || !resolvedProfile || keywords.length === 0) return;
+    const focusText = keywords.join(', ');
+    regenerateMutation.mutate({
       session_id: sessionId,
-      recommendation,
+      profile: resolvedProfile,
+      emphasis: focusText,
+      additional_alignment_text: keywordInstruction(keywords),
+      locked_bullet_ids: [],
+      rejected_item_ids: [],
     });
+  };
+
+  const handleGenerateCoverLetter = () => {
+    if (!sessionId || !resolvedProfile || !parsedJD || !recommendation) return;
+    setCoverLetterStatus(null);
+    coverLetterMutation.mutate({
+      session_id: sessionId,
+      profile: resolvedProfile,
+      parsed_jd: parsedJD,
+      recommendation,
+      job_title: recommendation.target_title,
+      tone: 'Professional',
+    });
+  };
+
+  const handleCopyCoverLetter = () => {
+    if (!coverLetterText) return;
+    void copyToClipboard(coverLetterText, 'Cover letter');
+  };
+
+  const handleNextJD = () => {
+    void saveCurrentResume({ coverLetterText });
+    resetJobSession();
+    setStep('jd-input');
+    navigate('/jd');
   };
 
   const handleOpenLatexEditor = () => {
@@ -210,84 +424,15 @@ const handleValidate = () => {
     navigate('/editor');
   };
 
-  const updateBulletStatus = (expIndex: number, bulletIndex: number, status: BulletStatus, section: ReviewSection) => {
-    if (!recommendation) return;
-    if (section === 'experience') {
-      const experience = [...recommendation.experience];
-      experience[expIndex] = updateEntryBullet(experience[expIndex], bulletIndex, (bullet) => ({ ...bullet, status }));
-      setRecommendation({ ...recommendation, experience });
-      return;
-    }
-
-    const projects = [...recommendation.projects];
-    projects[expIndex] = updateEntryBullet(projects[expIndex], bulletIndex, (bullet) => ({ ...bullet, status }));
-    setRecommendation({ ...recommendation, projects });
-  };
-
-  const updateBulletText = (expIndex: number, bulletIndex: number, text: string, section: ReviewSection) => {
-    if (!recommendation) return;
-    if (section === 'experience') {
-      const experience = [...recommendation.experience];
-      experience[expIndex] = updateEntryBullet(experience[expIndex], bulletIndex, (bullet) => ({ ...bullet, text, status: 'edited' }));
-      setRecommendation({ ...recommendation, experience });
-      return;
-    }
-
-    const projects = [...recommendation.projects];
-    projects[expIndex] = updateEntryBullet(projects[expIndex], bulletIndex, (bullet) => ({ ...bullet, text, status: 'edited' }));
-    setRecommendation({ ...recommendation, projects });
-  };
-
-  const toggleIncluded = (index: number, section: ReviewSection) => {
-    if (!recommendation) return;
-    if (section === 'experience') {
-      const experience = [...recommendation.experience];
-      experience[index] = { ...experience[index], included: !experience[index].included };
-      setRecommendation({ ...recommendation, experience });
-      return;
-    }
-
-    const projects = [...recommendation.projects];
-    projects[index] = { ...projects[index], included: !projects[index].included };
-    setRecommendation({ ...recommendation, projects });
-  };
-
-  // ── Loading state ──────────────────────────────────────────────────────
   if (blockingError) {
     return (
       <div className="empty-state">
-        <div className="empty-icon">❌</div>
-        <div className="empty-title">Cannot Start Review</div>
+        <div className="empty-icon">!</div>
+        <div className="empty-title">Cannot open resume output</div>
         <div className="empty-description">{blockingError}</div>
         <div style={{ display: 'flex', gap: 'var(--space-md)', marginTop: 'var(--space-md)' }}>
           <button className="btn btn-secondary" onClick={() => navigate('/profile')}>Go to Profile</button>
-          <button className="btn btn-primary" onClick={() => navigate('/jd')}>Go to JD Input</button>
-        </div>
-      </div>
-    );
-  }
-
-  // Show error if recommendation failed
-  if (recommendMutation.isError) {
-    return (
-      <div className="empty-state">
-        <div className="empty-icon">❌</div>
-        <div className="empty-title">Resume Generation Failed</div>
-        <div className="empty-description" style={{ color: 'var(--text-danger)' }}>
-          {(recommendMutation.error as Error).message || 'Something went wrong during AI analysis.'}
-        </div>
-        <div style={{ display: 'flex', gap: 'var(--space-md)', marginTop: 'var(--space-md)' }}>
-          <button className="btn btn-secondary" onClick={() => navigate('/profile')}>Check Profile</button>
-          <button className="btn btn-primary" onClick={() => {
-            if (sessionId && parsedJD && resolvedProfile) {
-              recommendMutation.mutate({
-                session_id: sessionId,
-                profile: resolvedProfile,
-                emphasis: emphasis || undefined,
-                rejected_item_ids: [],
-              });
-            }
-          }}>🔄 Retry</button>
+          <button className="btn btn-primary" onClick={handleNextJD}>Go to JD Input</button>
         </div>
       </div>
     );
@@ -302,396 +447,382 @@ const handleValidate = () => {
     );
   }
 
-  if (recommendMutation.isPending) {
-    return (
-      <div className="loading-state">
-        <div className="spinner spinner-lg" />
-        <div className="loading-text">AI is analyzing your profile against the job description...</div>
-        <div style={{ color: 'var(--text-tertiary)', fontSize: '0.8rem' }}>This may take 15-30 seconds</div>
-      </div>
-    );
-  }
-
   if (!recommendation) {
     return (
       <div className="empty-state">
-        <div className="empty-icon">📄</div>
-        <div className="empty-title">No recommendation available</div>
+        <div className="empty-icon">Resume</div>
+        <div className="empty-title">No resume available</div>
         <div className="empty-description">
-          Resume recommendations are kept only for the active browser session. Please analyze the job description again to regenerate the review content.
+          Paste a job description to generate a fast ATS resume output.
         </div>
-        <button className="btn btn-primary" onClick={() => navigate('/jd')}>Go to JD Input</button>
+        <button className="btn btn-primary" onClick={handleNextJD}>Go to JD Input</button>
       </div>
     );
   }
 
-const rec = recommendation;
-
-  const handleApprovePdf = () => {
-    if (!sessionId || !recommendation) return;
-    setRenderError(null);
-    approvePdfMutation.mutate({
-      session_id: sessionId,
-      recommendation,
-    });
-  };
+  const contact = recommendation.contact;
+  const experiences = recommendation.experience.filter((entry) => entry.included);
+  const projects = recommendation.projects.filter((entry) => entry.included);
+  const certifications = recommendation.certifications.filter((entry) => entry.included);
+  const achievements = [...(recommendation.achievements ?? []), ...(recommendation.awards ?? [])].filter((entry) => entry.included);
+  const placement = alignmentReport?.keyword_placement;
+  const missingImportantKeywords = dedupeKeywords([
+    ...(placement?.missing_high_priority_keywords ?? []),
+    ...(alignmentReport?.keywords_missing ?? []).slice(0, 6),
+  ]).slice(0, 8);
+  const weaklyPlacedKeywords = dedupeKeywords(placement?.weakly_placed_keywords ?? []).slice(0, 6);
 
   return (
     <div className="animate-fade-in">
-      <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-        <div>
-          <h1 className="page-title">Review Resume</h1>
-          <p className="page-subtitle">
-            Review AI recommendations. Accept, edit, lock, or reject items before generating PDF.
-          </p>
+      <div className="page-header">
+        <h1 className="page-title">ATS Resume Ready</h1>
+        <p className="page-subtitle">Review, copy, optimize, and export your one-page resume.</p>
+      </div>
+
+      <div
+        style={{
+          position: 'sticky',
+          top: 'var(--space-md)',
+          zIndex: 5,
+          marginBottom: 'var(--space-lg)',
+          padding: 'var(--space-md)',
+          borderRadius: 'var(--radius-lg)',
+          background: 'var(--bg-card)',
+          border: '1px solid var(--border-subtle)',
+          backdropFilter: 'blur(12px)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          flexWrap: 'wrap',
+          gap: 'var(--space-md)',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-md)', flex: '1 1 520px' }}>
+          <ATSCompactScoreCard
+            atsScore={atsScore}
+            alignmentReport={alignmentReport}
+            compact
+          />
+          {copyStatus && <span style={{ color: 'var(--status-success)', fontSize: '0.85rem' }}>{copyStatus}</span>}
+          {coverLetterStatus && <span style={{ color: coverLetterMutation.isError ? 'var(--status-danger)' : 'var(--status-success)', fontSize: '0.85rem' }}>{coverLetterStatus}</span>}
         </div>
-        <div style={{ display: 'flex', gap: 'var(--space-sm)' }}>
-          <button className="btn btn-primary" onClick={handleApprovePdf} disabled={approvePdfMutation.isPending}>
-            {approvePdfMutation.isPending ? (
-              <>
-                <span className="spinner" />
-                Generating PDF...
-              </>
-            ) : (
-              '✓ Approve & Generate PDF'
-            )}
+
+        <div style={{ display: 'flex', gap: 'var(--space-sm)', flexWrap: 'wrap' }}>
+          <button className="btn btn-secondary" onClick={handleCopyResume}>Copy Resume</button>
+          <button className="btn btn-secondary" onClick={handleCopyMarkdown}>Copy Markdown</button>
+          <button className="btn btn-ghost" onClick={handleCopySummary}>Copy Summary</button>
+          <button className="btn btn-ghost" onClick={handleCopySkills}>Copy Skills</button>
+          <button className="btn btn-primary" onClick={handleExportDocx} disabled={docxMutation.isPending}>
+            {docxMutation.isPending ? <span className="spinner" /> : null}
+            {docxMutation.isPending ? 'Exporting...' : 'Download DOCX'}
           </button>
+          {pdfUrl ? (
+            <button className="btn btn-primary" onClick={handleDownloadPdf}>Download PDF</button>
+          ) : (
+            <button className="btn btn-secondary" onClick={handleGeneratePdf} disabled={approvePdfMutation.isPending}>
+              {approvePdfMutation.isPending ? <span className="spinner" /> : null}
+              {approvePdfMutation.isPending ? 'Generating...' : 'Generate PDF'}
+            </button>
+          )}
+          <button className="btn btn-secondary" onClick={handleGenerateCoverLetter} disabled={coverLetterMutation.isPending || !resolvedProfile}>
+            {coverLetterMutation.isPending ? <span className="spinner" /> : null}
+            {coverLetterMutation.isPending ? 'Writing...' : coverLetterText ? 'Regenerate Cover Letter' : 'Generate Cover Letter'}
+          </button>
+          <button className="btn btn-secondary" onClick={handleCopyCoverLetter} disabled={!coverLetterText}>
+            Copy Cover Letter
+          </button>
+          <button className="btn btn-ghost" onClick={handleOptimizeAgain} disabled={regenerateMutation.isPending || !focusKeywords.trim()}>
+            {regenerateMutation.isPending ? <span className="spinner" /> : null}
+            Optimize Again
+          </button>
+          <button className="btn btn-ghost" onClick={handleNextJD}>Next JD</button>
         </div>
       </div>
 
-      <AlignmentMetricsPanel alignmentReport={alignmentReport} atsScore={atsScore} />
-
-      {/* ATS Score Card - Prominent display */}
-      {atsScore && (
-        <div className="card" style={{ marginBottom: 'var(--space-lg)', background: 'linear-gradient(135deg, var(--bg-secondary) 0%, var(--bg-tertiary) 100%)', border: '1px solid var(--border-color)' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-md)' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-lg)' }}>
-              <div style={{ textAlign: 'center' }}>
-                <div style={{ fontSize: '2.5rem', fontWeight: 700, color: atsScore.overall_score >= 75 ? 'var(--status-success)' : atsScore.overall_score >= 50 ? 'var(--status-warning)' : 'var(--status-danger)' }}>
-                  {Math.round(atsScore.overall_score)}
-                </div>
-                <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Overall ATS Score</div>
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-xs)' }}>
-                <div style={{ display: 'flex', gap: 'var(--space-md)', fontSize: '0.9rem' }}>
-                  <span><strong>{Math.round(atsScore.keyword_score.coverage_percent)}%</strong> Keywords</span>
-                  <span><strong>{Math.round(atsScore.skill_score.required_coverage_percent)}%</strong> Required Skills</span>
-                  <span><strong>{Math.round(atsScore.responsibility_score)}%</strong> Responsibilities</span>
-                </div>
-                <div style={{ display: 'flex', gap: 'var(--space-md)', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-                  <span><strong>{Math.round(atsScore.format_score)}</strong> Format</span>
-                  <span><strong>{Math.round(atsScore.section_score.score)}</strong> Sections</span>
-                  <span><strong>{Math.round(atsScore.title_alignment_score)}</strong> Title Match</span>
-                </div>
-              </div>
-            </div>
-            <button className="btn btn-secondary" onClick={handleValidate} disabled={validateMutation.isPending}>
-              {validateMutation.isPending ? <span className="spinner" /> : '🔄 Recalculate Score'}
-            </button>
-          </div>
-          {atsScore.missing_keywords.length > 0 && (
-            <div style={{ marginTop: 'var(--space-md)', paddingTop: 'var(--space-md)', borderTop: '1px solid var(--border-color)' }}>
-              <div style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: 'var(--space-xs)' }}>Missing Keywords:</div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
-                {atsScore.missing_keywords.slice(0, 10).map((kw) => (
-                  <span key={kw} className="keyword-tag keyword-missing">{kw}</span>
-                ))}
-              </div>
-            </div>
-          )}
-          {atsScore.recommendations.length > 0 && (
-            <div style={{ marginTop: 'var(--space-md)', paddingTop: 'var(--space-md)', borderTop: '1px solid var(--border-color)' }}>
-              <div style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: 'var(--space-xs)' }}>Recommendations:</div>
-              <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-                {atsScore.recommendations.slice(0, 3).join(' • ')}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* PDF Generation Success Message */}
-      {pipelinePdf?.requested && pipelinePdf.compile_success && (
-        <div className="warning-banner" style={{ marginBottom: 'var(--space-md)', background: 'var(--status-success)', color: 'white' }}>
-          <span>✓</span>
-          <span>PDF generated successfully! You can download it or edit the LaTeX source.</span>
-        </div>
-      )}
-
-{/* PDF Failure - Show on review page */}
-      {(renderError || (pipelinePdf?.requested && !pipelinePdf.compile_success)) && (
-        <div className="card" style={{ marginBottom: 'var(--space-xl)', borderColor: 'var(--status-danger)', background: 'var(--bg-tertiary)' }}>
-          <div className="card-title" style={{ marginBottom: 'var(--space-sm)', color: 'var(--status-danger)' }}>
-            ⚠️ PDF Generation Failed
-          </div>
-          <p style={{ marginTop: 0, color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
-            {renderError || pipelinePdf?.compile_errors.join('; ') || 'PDF compilation failed. Your resume is ready for review below - try regenerating or open the LaTeX editor to fix the issue.'}
-          </p>
-          {pipelinePdf?.line_number && (
-            <p style={{ margin: 0, color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
-              Approximate LaTeX line: <strong>{pipelinePdf.line_number}</strong>
-            </p>
-          )}
-          <div style={{ display: 'flex', gap: 'var(--space-sm)', flexWrap: 'wrap', marginTop: 'var(--space-md)' }}>
-            <button className="btn btn-secondary" onClick={handleRegenerate} disabled={regenerateMutation.isPending}>
-              {regenerateMutation.isPending ? <span className="spinner" /> : '🔄 Regenerate'}
-            </button>
-            {latexSource && (
-              <button className="btn btn-primary" onClick={handleOpenLatexEditor}>
-                Open LaTeX Editor
-              </button>
-            )}
-          </div>
-        </div>
-)}
-
-      {/* Regeneration Controls */}
-      <div className="card" style={{ marginBottom: 'var(--space-lg)', background: 'var(--bg-secondary)' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-md)' }}>
-          <div className="card-title" style={{ marginBottom: 0 }}>🔄 Regenerate Resume</div>
-          <button className="btn btn-primary" onClick={handleRegenerate} disabled={regenerateMutation.isPending}>
-            {regenerateMutation.isPending ? (
-              <>
-                <span className="spinner" />
-                Regenerating...
-              </>
-            ) : (
-              'Regenerate for higher ATS score'
-            )}
+  {renderError && (
+    <div className="warning-banner warning-error" style={{ marginBottom: 'var(--space-lg)' }}>
+      <span>PDF</span>
+      <div style={{ flex: 1 }}>
+        <div>{renderError}</div>
+        <div style={{ marginTop: 'var(--space-sm)', display: 'flex', gap: 'var(--space-sm)', flexWrap: 'wrap' }}>
+          <button className="btn btn-ghost btn-sm" onClick={handleOptimizeAgain} disabled={regenerateMutation.isPending || !focusKeywords.trim()}>
+            Optimize Again
           </button>
+          <button className="btn btn-ghost btn-sm" onClick={handleOpenLatexEditor}>Open Advanced LaTeX Editor</button>
         </div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: 'var(--space-md)' }}>
-          <div className="form-group" style={{ marginBottom: 0 }}>
-            <label className="form-label">Focus keywords / Emphasis</label>
-            <input
-              className="form-input"
-              value={emphasis}
-              onChange={(e) => setEmphasis(e.target.value)}
-              placeholder="e.g. leadership, backend, OBDX, microservices"
-              disabled={regenerateMutation.isPending}
-            />
-            <div className="form-hint">Optional: highlight specific skills or areas</div>
-          </div>
-          <div className="form-group" style={{ marginBottom: 0 }}>
-            <label className="form-label">Additional context</label>
-            <textarea
-              className="form-textarea"
-              value={additionalContext}
-              onChange={(e) => setAdditionalContext(e.target.value)}
-              placeholder="Add specific JD keywords, tools, or responsibilities to emphasize..."
-              style={{ minHeight: 70 }}
-              disabled={regenerateMutation.isPending}
-            />
-          </div>
-        </div>
-      </div>
-
-      {/* Resume Title & Summary */}
-      <div className="card" style={{ marginBottom: 'var(--space-lg)' }}>
-        <div className="card-title">📌 {rec.target_title}</div>
-        {rec.summary && (
-          <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginTop: 'var(--space-sm)', lineHeight: 1.6 }}>
-            {rec.summary}
-          </p>
+        {(compileErrors.length > 0 || compileWarnings.length > 0 || pdflatexExcerpt) && (
+          <details style={{ marginTop: 'var(--space-sm)' }}>
+            <summary style={{ cursor: 'pointer', fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
+              Advanced details
+            </summary>
+            <div style={{ marginTop: 'var(--space-xs)', fontSize: '0.8rem', fontFamily: 'monospace', whiteSpace: 'pre-wrap', maxHeight: 200, overflow: 'auto', background: 'var(--bg-glass)', padding: 'var(--space-sm)', borderRadius: 'var(--radius-md)' }}>
+              {compileErrors.map((err, i) => (
+                <div key={i} style={{ color: 'var(--status-danger)' }}>{err}</div>
+              ))}
+              {compileWarnings.map((w, i) => (
+                <div key={i} style={{ color: 'var(--text-tertiary)' }}>{w}</div>
+              ))}
+              {compileLineNumber != null && (
+                <div style={{ color: 'var(--text-secondary)' }}>Line: {compileLineNumber}</div>
+              )}
+              {pdflatexExcerpt && (
+                <div style={{ marginTop: 'var(--space-xs)', color: 'var(--text-tertiary)' }}>{pdflatexExcerpt}</div>
+              )}
+            </div>
+          </details>
         )}
       </div>
+    </div>
+  )}
 
-      {/* Tabs */}
-      <div className="tabs">
-        {[
-          { key: 'experience' as const, label: `Experience (${rec.experience.length})` },
-          { key: 'projects' as const, label: `Projects (${rec.projects.length})` },
-          { key: 'skills' as const, label: `Skills (${rec.skills.length} groups)` },
-          { key: 'scores' as const, label: 'Keywords' },
-        ].map((t) => (
-          <button key={t.key} className={`tab ${activeTab === t.key ? 'active' : ''}`} onClick={() => setActiveTab(t.key)}>
-            {t.label}
-          </button>
-        ))}
-      </div>
-
-      {/* Experience Tab */}
-      {activeTab === 'experience' && rec.experience.map((exp, ei) => (
-        <div key={exp.source_id} className="experience-card" style={{ opacity: exp.included ? 1 : 0.4 }}>
-          <div className="experience-header">
-            <div>
-              <div className="experience-title">{exp.title}</div>
-              <div className="experience-company">{exp.company}{exp.location ? ` • ${exp.location}` : ''}</div>
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-sm)' }}>
-              <div className="experience-dates">{exp.start_date} — {exp.end_date || 'Present'}</div>
-              <div className="relevance-bar">
-                <div className="relevance-fill" style={{
-                  width: `${exp.relevance_score * 100}%`,
-                  background: exp.relevance_score > 0.7 ? 'var(--status-success)' : exp.relevance_score > 0.4 ? 'var(--status-warning)' : 'var(--status-danger)',
-                }} />
-              </div>
-              <button
-                className={`btn btn-sm ${exp.included ? 'btn-danger' : 'btn-success'}`}
-                onClick={() => toggleIncluded(ei, 'experience')}
-              >
-                {exp.included ? 'Exclude' : 'Include'}
-              </button>
-            </div>
-          </div>
-
-          {exp.included && exp.bullets.map((bullet, bi) => (
-            <BulletReviewItem
-              key={bullet.id}
-              bullet={bullet}
-              onStatusChange={(status) => updateBulletStatus(ei, bi, status, 'experience')}
-              onTextChange={(text) => updateBulletText(ei, bi, text, 'experience')}
-            />
-          ))}
+      {regenerateMutation.isError && (
+        <div className="warning-banner warning-error" style={{ marginBottom: 'var(--space-lg)' }}>
+          <span>Optimize</span>
+          <span>{regenerateMutation.error instanceof Error ? regenerateMutation.error.message : 'Could not improve resume.'}</span>
         </div>
-      ))}
+      )}
 
-      {/* Projects Tab */}
-      {activeTab === 'projects' && rec.projects.map((proj, pi) => (
-        <div key={proj.source_id} className="experience-card" style={{ opacity: proj.included ? 1 : 0.4 }}>
-          <div className="experience-header">
-            <div>
-              <div className="experience-title">{proj.name}</div>
-              <div className="experience-company">{proj.technologies.join(', ')}</div>
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-sm)' }}>
-              <button
-                className={`btn btn-sm ${proj.included ? 'btn-danger' : 'btn-success'}`}
-                onClick={() => toggleIncluded(pi, 'projects')}
-              >
-                {proj.included ? 'Exclude' : 'Include'}
-              </button>
-            </div>
-          </div>
+      <div className="fast-console-layout">
+        <div className="card" style={{ background: 'rgba(255, 255, 255, 0.03)' }}>
+          <div style={{ maxWidth: 820, margin: '0 auto', color: 'var(--text-primary)' }}>
+            {contact && (
+              <section style={{ textAlign: 'center', marginBottom: 'var(--space-lg)' }}>
+                <h2 style={{ margin: 0, fontSize: '1.7rem' }}>{contact.full_name}</h2>
+                <div style={{ marginTop: 'var(--space-xs)', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                  {[contact.email, contact.phone, contact.location, contact.linkedin_url, contact.github_url, contact.portfolio_url]
+                    .filter(Boolean)
+                    .join(' | ')}
+                </div>
+              </section>
+            )}
 
-          {proj.included && proj.bullets.map((bullet, bi) => (
-            <BulletReviewItem
-              key={bullet.id}
-              bullet={bullet}
-              onStatusChange={(status) => updateBulletStatus(pi, bi, status, 'projects')}
-              onTextChange={(text) => updateBulletText(pi, bi, text, 'projects')}
-            />
-          ))}
-        </div>
-      ))}
+            <section style={{ marginBottom: 'var(--space-lg)' }}>
+              <h3 style={{ margin: 0, fontSize: '1.15rem' }}>{recommendation.target_title}</h3>
+              <textarea
+                className="form-textarea"
+                value={recommendation.summary || ''}
+                onChange={(event) => handleSummaryChange(event.target.value)}
+                placeholder="Add a concise ATS summary..."
+                style={{ marginTop: 'var(--space-sm)', minHeight: 90, background: 'var(--bg-glass)' }}
+              />
+            </section>
 
-      {/* Skills Tab */}
-      {activeTab === 'skills' && (
-        <div className="card">
-          {rec.skills.map((sg, i) => (
-            <div key={i} style={{ marginBottom: 'var(--space-md)' }}>
-              <div style={{ fontWeight: 600, fontSize: '0.9rem', marginBottom: 'var(--space-xs)' }}>{sg.category}</div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
-                {sg.skills.map((skill) => (
-                  <span key={skill} className="badge badge-info">{skill}</span>
+            {recommendation.skills.length > 0 && (
+              <ResumeSection title="Technical Skills">
+                {recommendation.skills.map((group) => (
+                  <div key={group.category} style={{ marginBottom: '6px', fontSize: '0.9rem' }}>
+                    <strong>{group.category}:</strong> {group.skills.join(', ')}
+                  </div>
                 ))}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
+              </ResumeSection>
+            )}
 
-      {/* Keywords Tab */}
-      {activeTab === 'scores' && parsedJD && (
-        <div className="card">
-          <div className="card-title" style={{ marginBottom: 'var(--space-lg)' }}>JD Keywords</div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
-            {parsedJD.keywords.map((kw) => {
-              // Check if keyword exists in recommendation text
-              const recText = JSON.stringify(rec).toLowerCase();
-              const found = recText.includes(kw.keyword.toLowerCase());
-              return (
-                <span key={kw.keyword} className={`keyword-tag ${found ? 'keyword-found' : 'keyword-missing'}`}>
-                  {kw.keyword}
-                  {kw.importance === 'critical' && ' ★'}
-                </span>
-              );
-            })}
+            {experiences.length > 0 && (
+              <ResumeSection title="Experience">
+                {experiences.map((entry, entryIndex) => (
+                  <div key={entry.source_id} style={{ marginBottom: 'var(--space-md)' }}>
+                    <EntryHeader
+                      title={entry.title}
+                      subtitle={entry.company}
+                      meta={`${entry.start_date} - ${entry.end_date || 'Present'}`}
+                    />
+                    <EditableBulletList
+                      bullets={includedBulletsWithIndex(entry.bullets)}
+                      onChange={(bulletIndex, text) => handleExperienceBulletChange(entryIndex, bulletIndex, text)}
+                    />
+                  </div>
+                ))}
+              </ResumeSection>
+            )}
+
+            {projects.length > 0 && (
+              <ResumeSection title="Projects">
+                {projects.map((entry, entryIndex) => (
+                  <div key={entry.source_id} style={{ marginBottom: 'var(--space-md)' }}>
+                    <EntryHeader
+                      title={entry.name}
+                      subtitle={entry.technologies.join(', ')}
+                    />
+                    <EditableBulletList
+                      bullets={includedBulletsWithIndex(entry.bullets)}
+                      onChange={(bulletIndex, text) => handleProjectBulletChange(entryIndex, bulletIndex, text)}
+                    />
+                  </div>
+                ))}
+              </ResumeSection>
+            )}
+
+            {recommendation.education.length > 0 && (
+              <ResumeSection title="Education">
+                {recommendation.education.map((entry) => (
+                  <div key={entry.source_id} style={{ marginBottom: '6px', fontSize: '0.9rem' }}>
+                    <strong>{entry.institution}</strong>
+                    <span style={{ color: 'var(--text-secondary)' }}>
+                      {' '}| {[entry.degree, entry.field_of_study, entry.gpa].filter(Boolean).join(', ')}
+                    </span>
+                  </div>
+                ))}
+              </ResumeSection>
+            )}
+
+            {certifications.length > 0 && (
+              <ResumeSection title="Certifications">
+                {certifications.map((entry) => (
+                  <div key={entry.source_id} style={{ marginBottom: '6px', fontSize: '0.9rem' }}>
+                    <strong>{entry.name}</strong>
+                    <span style={{ color: 'var(--text-secondary)' }}>
+                      {' '}| {[entry.issuing_org, entry.date].filter(Boolean).join(' | ')}
+                    </span>
+                  </div>
+                ))}
+              </ResumeSection>
+            )}
+
+            {achievements.length > 0 && (
+              <ResumeSection title="Achievements">
+                {achievements.map((entry) => (
+                  <div key={entry.source_id} style={{ marginBottom: '6px', fontSize: '0.9rem' }}>
+                    <strong>{entry.title}</strong>
+                    <span style={{ color: 'var(--text-secondary)' }}>
+                      {' '}| {[entry.issuer, entry.date, entry.description].filter(Boolean).join(' | ')}
+                    </span>
+                  </div>
+                ))}
+              </ResumeSection>
+            )}
+
+            {(recommendation.custom_sections ?? []).filter((entry) => entry.included && entry.items.length > 0).map((entry) => (
+              <ResumeSection key={entry.title} title={entry.title}>
+                {entry.items.map((item) => (
+                  <div key={item} style={{ marginBottom: '6px', fontSize: '0.9rem' }}>- {item}</div>
+                ))}
+              </ResumeSection>
+            ))}
           </div>
         </div>
-      )}
+
+        <aside className="fast-console-side">
+          <div className="card">
+            <div className="card-title" style={{ marginBottom: 'var(--space-md)' }}>Optimization</div>
+            {(missingImportantKeywords.length > 0 || weaklyPlacedKeywords.length > 0) && (
+              <div style={{ marginBottom: 'var(--space-md)', display: 'grid', gap: 'var(--space-sm)' }}>
+                {missingImportantKeywords.length > 0 && (
+                  <div>
+                    <div className="form-label">Missing important keywords</div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                      {missingImportantKeywords.map((keyword) => (
+                        <span key={keyword} className="keyword-tag keyword-missing">{keyword}</span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {weaklyPlacedKeywords.length > 0 && (
+                  <div>
+                    <div className="form-label">Weak keyword placement</div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                      {weaklyPlacedKeywords.map((keyword) => (
+                        <span key={keyword} className="keyword-tag">{keyword}</span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <button
+                  className="btn btn-secondary"
+                  style={{ width: '100%' }}
+                  onClick={() => handleAddMissingKeywords(dedupeKeywords([...missingImportantKeywords, ...weaklyPlacedKeywords]))}
+                  disabled={regenerateMutation.isPending || !resolvedProfile}
+                >
+                  {regenerateMutation.isPending ? <span className="spinner" /> : null}
+                  Add missing keywords naturally
+                </button>
+              </div>
+            )}
+            <div className="form-group" style={{ marginBottom: 'var(--space-sm)' }}>
+              <label className="form-label">Optimize Again</label>
+              <input
+                className="form-input"
+                value={focusKeywords}
+                onChange={(event) => setFocusKeywords(event.target.value)}
+                placeholder="Add focus keywords, e.g. Java, Jenkins, OBDX..."
+                disabled={regenerateMutation.isPending}
+              />
+            </div>
+            <button className="btn btn-primary" style={{ width: '100%' }} onClick={handleOptimizeAgain} disabled={regenerateMutation.isPending || !focusKeywords.trim()}>
+              {regenerateMutation.isPending ? <span className="spinner" /> : null}
+              {regenerateMutation.isPending ? 'Improving...' : 'Improve Resume'}
+            </button>
+            <button className="btn btn-secondary" style={{ width: '100%', marginTop: 'var(--space-sm)' }} onClick={() => recommendation && validateMutation.mutate({ session_id: sessionId || '', recommendation })} disabled={validateMutation.isPending || !sessionId}>
+              {validateMutation.isPending ? <span className="spinner" /> : null}
+              Refresh Score
+            </button>
+          </div>
+
+          {latexSource && (
+            <details className="card">
+              <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Advanced</summary>
+              <button className="btn btn-ghost btn-sm" style={{ marginTop: 'var(--space-md)' }} onClick={handleOpenLatexEditor}>
+                Open LaTeX editor
+              </button>
+            </details>
+          )}
+        </aside>
+      </div>
     </div>
   );
 }
 
-// ─── Bullet Review Component ────────────────────────────────────────────────
-
-function BulletReviewItem({
-  bullet,
-  onStatusChange,
-  onTextChange,
-}: {
-  bullet: ResumeBullet;
-  onStatusChange: (status: BulletStatus) => void;
-  onTextChange: (text: string) => void;
-}) {
-  const [editing, setEditing] = useState(false);
-  const [editText, setEditText] = useState(bullet.text);
-
-  const statusClass = {
-    pending: '',
-    accepted: 'bullet-accepted',
-    edited: 'bullet-accepted',
-    locked: 'bullet-locked',
-    rejected: 'bullet-rejected',
-  }[bullet.status];
-
-  const statusBadge = {
-    pending: <span className="badge badge-neutral">Pending</span>,
-    accepted: <span className="badge badge-success">Accepted</span>,
-    edited: <span className="badge badge-success">Edited</span>,
-    locked: <span className="badge badge-info">🔒 Locked</span>,
-    rejected: <span className="badge badge-danger">Rejected</span>,
-  }[bullet.status];
-
-  const handleSaveEdit = () => {
-    onTextChange(editText);
-    setEditing(false);
-  };
-
+function ResumeSection({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <div className={`bullet-item ${statusClass}`} style={{ marginBottom: 'var(--space-sm)' }}>
-      <div style={{ flex: 1 }}>
-        {editing ? (
-          <div style={{ display: 'flex', gap: 'var(--space-sm)' }}>
-            <textarea
-              className="form-textarea"
-              value={editText}
-              onChange={(e) => setEditText(e.target.value)}
-              style={{ minHeight: '60px', fontSize: '0.85rem' }}
-            />
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-              <button className="btn btn-success btn-sm" onClick={handleSaveEdit}>Save</button>
-              <button className="btn btn-ghost btn-sm" onClick={() => { setEditing(false); setEditText(bullet.text); }}>Cancel</button>
-            </div>
-          </div>
-        ) : (
-          <>
-            <div className="bullet-text">• {bullet.text}</div>
-            {bullet.matched_keywords.length > 0 && (
-              <div className="bullet-keywords">
-                {bullet.matched_keywords.map((kw) => (
-                  <span key={kw} className="keyword-tag keyword-found">{kw}</span>
-                ))}
-              </div>
-            )}
-          </>
-        )}
+    <section style={{ marginBottom: 'var(--space-lg)' }}>
+      <h3
+        style={{
+          margin: '0 0 var(--space-sm)',
+          paddingBottom: '6px',
+          borderBottom: '1px solid var(--border-medium)',
+          fontSize: '0.9rem',
+          textTransform: 'uppercase',
+          letterSpacing: '0.04em',
+        }}
+      >
+        {title}
+      </h3>
+      {children}
+    </section>
+  );
+}
+
+function EntryHeader({ title, subtitle, meta }: { title: string; subtitle?: string; meta?: string }) {
+  return (
+    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 'var(--space-md)', marginBottom: '6px' }}>
+      <div>
+        <div style={{ fontWeight: 700 }}>{title}</div>
+        {subtitle && <div style={{ color: 'var(--text-secondary)', fontSize: '0.86rem' }}>{subtitle}</div>}
       </div>
-      <div className="bullet-actions" style={{ alignItems: 'center' }}>
-        {statusBadge}
-        {!editing && bullet.status !== 'rejected' && (
-          <>
-            <button className="btn btn-ghost btn-sm" onClick={() => onStatusChange('accepted')} title="Accept">✓</button>
-            <button className="btn btn-ghost btn-sm" onClick={() => setEditing(true)} title="Edit">✏️</button>
-            <button className="btn btn-ghost btn-sm" onClick={() => onStatusChange('locked')} title="Lock">🔒</button>
-            <button className="btn btn-ghost btn-sm" onClick={() => onStatusChange('rejected')} title="Reject">✕</button>
-          </>
-        )}
-        {bullet.status === 'rejected' && (
-          <button className="btn btn-ghost btn-sm" onClick={() => onStatusChange('pending')} title="Restore">↩</button>
-        )}
-      </div>
-</div>
+      {meta && <div style={{ color: 'var(--text-tertiary)', fontSize: '0.82rem', whiteSpace: 'nowrap' }}>{meta}</div>}
+    </div>
+  );
+}
+
+function EditableBulletList({
+  bullets,
+  onChange,
+}: {
+  bullets: Array<{ bullet: ResumeBullet; index: number }>;
+  onChange: (bulletIndex: number, text: string) => void;
+}) {
+  return (
+    <div style={{ display: 'grid', gap: '6px' }}>
+      {bullets.map(({ bullet, index }) => (
+        <div key={bullet.id} style={{ display: 'grid', gridTemplateColumns: '18px minmax(0, 1fr)', gap: '6px', alignItems: 'start' }}>
+          <span style={{ color: 'var(--text-secondary)', lineHeight: '34px' }}>-</span>
+          <textarea
+            className="form-textarea"
+            value={bullet.text}
+            onChange={(event) => onChange(index, event.target.value)}
+            style={{ minHeight: 44, padding: '8px 10px', resize: 'vertical', background: 'var(--bg-glass)' }}
+          />
+        </div>
+      ))}
+    </div>
   );
 }

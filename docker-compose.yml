@@ -16,16 +16,12 @@ services:
       - LATEX_OUTPUT_DIR=/app/output
 
   frontend:
-    image: node:20-slim
-    working_dir: /app
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
     ports:
       - "5173:5173"
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
     environment:
       - VITE_API_BASE=http://localhost:8000/api/v1
-    command: >
-      sh -c "npm ci && npm run dev -- --host"
     depends_on:
       - backend

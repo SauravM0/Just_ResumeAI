@@ -19,6 +19,7 @@ from app.schemas.resume import (
     ResumeValidateRequest,
     ResumeApproveGeneratePdfRequest,
     ResumeApproveGeneratePdfResponse,
+    ResumeCompileLatexSourceRequest,
     ResumeRenderLatexRequest,
     ResumeRenderLatexResponse,
     ResumeRenderPdfRequest,
@@ -34,11 +35,14 @@ from app.services.ats_keyword_planner import build_ats_keyword_plan
 from app.services.scoring_service import compute_ats_score
 from app.services.latex_render_service import render_latex
 from app.services.pdf_compile_service import compile_pdf, PDFCompileError
+from app.services.resume_budget_service import fit_resume_to_page_budget
+from app.services.docx_export_service import export_resume_docx
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/resume", tags=["resume"])
 
 _SAFE_PDF_FILENAME_RE = re.compile(r"^resume_[a-f0-9]{32}_[a-f0-9]{6}\.pdf$")
+_SAFE_DOCX_FILENAME_RE = re.compile(r"^resume_[a-f0-9]{32}_[a-f0-9]{6}\.docx$")
 
 
 class LaTeXRenderError(Exception):
@@ -93,6 +97,16 @@ def _compile_failure_response(
     }
 
 
+def _fit_recommendation_for_pdf(session, recommendation):
+    if not session.parsed_jd:
+        return recommendation
+    return fit_resume_to_page_budget(
+        recommendation=recommendation,
+        parsed_jd=session.parsed_jd,
+        target_pages=1,
+    )
+
+
 @router.post("/recommend", response_model=ResumeRecommendResponse)
 async def recommend_resume(
     request: ResumeRecommendRequest,
@@ -126,7 +140,7 @@ async def recommend_resume(
             additional_alignment_text=request.additional_alignment_text,
             ats_plan=ats_plan,
         )
-        alignment_report = build_ats_alignment_report(parsed_jd, recommendation)
+        alignment_report = build_ats_alignment_report(parsed_jd, recommendation, ats_plan=ats_plan)
 
         # Store in session
         session.recommendation = recommendation
@@ -146,7 +160,7 @@ async def recommend_resume(
             additional_alignment_text=request.additional_alignment_text,
             ats_plan=ats_plan,
         )
-        alignment_report = build_ats_alignment_report(parsed_jd, recommendation)
+        alignment_report = build_ats_alignment_report(parsed_jd, recommendation, ats_plan=ats_plan)
         session.recommendation = recommendation
         session.rejected_ids = list(request.rejected_item_ids)
         save_session(session)
@@ -197,7 +211,7 @@ async def regenerate_resume(
             additional_alignment_text=request.additional_alignment_text,
             ats_plan=ats_plan,
         )
-        alignment_report = build_ats_alignment_report(parsed_jd, recommendation)
+        alignment_report = build_ats_alignment_report(parsed_jd, recommendation, ats_plan=ats_plan)
 
         session.recommendation = recommendation
         session.rejected_ids = list(request.rejected_item_ids)
@@ -216,7 +230,7 @@ async def regenerate_resume(
             additional_alignment_text=request.additional_alignment_text,
             ats_plan=ats_plan,
         )
-        alignment_report = build_ats_alignment_report(parsed_jd, recommendation)
+        alignment_report = build_ats_alignment_report(parsed_jd, recommendation, ats_plan=ats_plan)
         session.recommendation = recommendation
         session.rejected_ids = list(request.rejected_item_ids)
         save_session(session)
@@ -259,8 +273,9 @@ async def approve_generate_pdf(
         raise HTTPException(status_code=404, detail="Session not found or expired")
 
     try:
-        latex_source = render_latex(request.recommendation)
-        session.recommendation = request.recommendation
+        recommendation = _fit_recommendation_for_pdf(session, request.recommendation)
+        latex_source = render_latex(recommendation)
+        session.recommendation = recommendation
         session.latex_source = latex_source
         save_session(session)
 
@@ -295,6 +310,31 @@ async def approve_generate_pdf(
         raise HTTPException(status_code=500, detail="PDF generation failed. Please retry.")
 
 
+@router.post("/export-docx")
+async def export_docx(
+    request: ResumeApproveGeneratePdfRequest,
+    user_id: str = Depends(get_current_user_id),
+):
+    """Export the reviewed recommendation as a simple ATS-friendly DOCX."""
+    session = get_session(request.session_id, user_id=user_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+
+    try:
+        recommendation = _fit_recommendation_for_pdf(session, request.recommendation)
+        docx_path = export_resume_docx(recommendation, request.session_id)
+        session.recommendation = recommendation
+        save_session(session)
+        return FileResponse(
+            path=docx_path,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            filename=Path(docx_path).name,
+        )
+    except Exception as e:
+        logger.error("DOCX export failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="DOCX export failed. Please retry.")
+
+
 @router.post("/render-latex", response_model=ResumeRenderLatexResponse)
 async def render_resume_latex(
     request: ResumeRenderLatexRequest,
@@ -308,7 +348,9 @@ async def render_resume_latex(
         raise HTTPException(status_code=404, detail="Session not found or expired")
 
     try:
-        latex_source = render_latex(request.recommendation)
+        recommendation = _fit_recommendation_for_pdf(session, request.recommendation)
+        latex_source = render_latex(recommendation)
+        session.recommendation = recommendation
         session.latex_source = latex_source
         save_session(session)
 
@@ -364,6 +406,45 @@ async def render_resume_pdf(
         raise HTTPException(status_code=500, detail=f"PDF compilation failed: {str(e)}")
 
 
+@router.post("/compile-latex-source", response_model=ResumeApproveGeneratePdfResponse)
+async def compile_latex_source(
+    request: ResumeCompileLatexSourceRequest,
+    user_id: str = Depends(get_current_user_id),
+):
+    """
+    Compile user-edited LaTeX source from the advanced editor and persist it.
+    """
+    session = get_session(request.session_id, user_id=user_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+
+    latex_source = request.latex_source
+    session.latex_source = latex_source
+    save_session(session)
+
+    try:
+        pdf_path, warnings = await compile_pdf(
+            latex_source=latex_source,
+            session_id=request.session_id,
+        )
+        pdf_filename = pdf_path.split("/")[-1].split("\\")[-1]
+        session.pdf_filename = pdf_filename
+        save_session(session)
+
+        return ResumeApproveGeneratePdfResponse(
+            latex_source=latex_source,
+            pdf_url=f"/api/v1/resume/download/{pdf_filename}",
+            compile_success=True,
+            compile_errors=[],
+            compile_warnings=warnings,
+        )
+    except PDFCompileError as e:
+        return ResumeApproveGeneratePdfResponse(**_compile_failure_response(e, latex_source))
+    except Exception as e:
+        logger.error("Advanced LaTeX compilation failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"PDF compilation failed: {str(e)}")
+
+
 @router.get("/download/{filename}")
 async def download_pdf(filename: str):
     """Serve a compiled PDF for download."""
@@ -383,5 +464,28 @@ async def download_pdf(filename: str):
     return FileResponse(
         path=str(pdf_path),
         media_type="application/pdf",
+        filename=filename,
+    )
+
+
+@router.get("/download-docx/{filename}")
+async def download_docx(filename: str):
+    """Serve a generated DOCX for download."""
+    if not _SAFE_DOCX_FILENAME_RE.match(filename):
+        raise HTTPException(status_code=404, detail="DOCX not found")
+
+    settings = get_settings()
+    output_dir = Path(settings.LATEX_OUTPUT_DIR).resolve()
+    docx_path = (output_dir / filename).resolve()
+
+    if output_dir not in docx_path.parents:
+        raise HTTPException(status_code=404, detail="DOCX not found")
+
+    if not docx_path.exists() or docx_path.suffix.lower() != ".docx":
+        raise HTTPException(status_code=404, detail="DOCX not found")
+
+    return FileResponse(
+        path=str(docx_path),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         filename=filename,
     )

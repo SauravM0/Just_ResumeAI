@@ -17,6 +17,11 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# Local environment files
+.env
+.env.*
+!.env.example
+
 # Python
 __pycache__/
 *.py[cod]
@@ -32,16 +37,21 @@ __pycache__/
 venv/
 
 # Backend local config and generated files
-/backend/.env
-/backend/.env.*
-!/backend/.env.example
-/backend/output/
+backend/.env
+backend/.env.*
+!backend/.env.example
+backend/output/
+backend/*.sqlite3
+backend/**/__pycache__/
+backend/**/*.pyc
+backend/.pytest_cache/
+.pytest_cache/
 
 # Frontend dependencies and build output
-/frontend/node_modules/
-/frontend/dist/
-/frontend/dist-ssr/
-/frontend/*.local
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+frontend/*.local
 
 # Local workspace artifacts
 /scratch/

@@ -4,14 +4,17 @@ import re
 from collections import OrderedDict
 
 from app.schemas.alignment import ATSAlignmentReport
+from app.schemas.ats_planner import ATSKeywordPlannerOutput
 from app.schemas.jd import ParsedJD
 from app.schemas.resume import ResumeRecommendation, BulletStatus
+from app.services.keyword_placement_service import analyze_keyword_placement
 
 
 def build_ats_alignment_report(
     parsed_jd: ParsedJD,
     recommendation: ResumeRecommendation,
     formatting_score: float | None = None,
+    ats_plan: ATSKeywordPlannerOutput | None = None,
 ) -> ATSAlignmentReport:
     """Compare parsed JD terms with the generated resume to guide ATS optimization."""
     important_keywords = _important_keywords(parsed_jd)
@@ -29,13 +32,20 @@ def build_ats_alignment_report(
     section_score = _section_completeness_score(recommendation)
     format_score = 100.0 if formatting_score is None else formatting_score
     responsibility_score = _responsibility_coverage(parsed_jd.responsibilities, resume_corpus)
+    placement_report = analyze_keyword_placement(recommendation, parsed_jd, ats_plan)
 
+    # Keep this aligned with external ATS behavior: keyword/title gaps should
+    # dominate the report instead of being hidden by good section completeness.
     overall = (
-        keyword_coverage * 0.55
-        + section_score * 0.20
-        + format_score * 0.15
-        + responsibility_score * 0.10
+        keyword_coverage * 0.72
+        + responsibility_score * 0.12
+        + format_score * 0.08
+        + section_score * 0.08
     )
+    if keyword_coverage < 50:
+        overall = min(overall, 60.0)
+    elif keyword_coverage < 65:
+        overall = min(overall, 72.0)
 
     return ATSAlignmentReport(
         overall_alignment_percent=round(overall, 1),
@@ -49,8 +59,9 @@ def build_ats_alignment_report(
         important_ats_keywords=important_keywords,
         keywords_included=included,
         keywords_missing=missing,
-        suggestions=_suggestions(parsed_jd, missing, recommendation),
-        resume_rewrite_strategy=_rewrite_strategy(parsed_jd, missing),
+        keyword_placement=placement_report,
+        suggestions=_suggestions(parsed_jd, missing, recommendation, placement_report),
+        resume_rewrite_strategy=_rewrite_strategy(parsed_jd, missing, placement_report),
     )
 
 
@@ -140,10 +151,14 @@ def _section_completeness_score(recommendation: ResumeRecommendation) -> float:
     return sum(1 for check in checks if check) / len(checks) * 100
 
 
-def _suggestions(parsed_jd: ParsedJD, missing: list[str], recommendation: ResumeRecommendation) -> list[str]:
+def _suggestions(parsed_jd: ParsedJD, missing: list[str], recommendation: ResumeRecommendation, placement_report) -> list[str]:
     suggestions: list[str] = []
     if parsed_jd.job_title and not _contains_keyword(_normalize(recommendation.target_title), parsed_jd.job_title):
         suggestions.append(f"Use the JD title '{parsed_jd.job_title}' in the resume headline.")
+    if placement_report.missing_high_priority_keywords:
+        suggestions.append("Add missing important keywords naturally to the title, summary, skills, or strongest bullets.")
+    if placement_report.weakly_placed_keywords:
+        suggestions.append("Move weakly placed important keywords into the summary, skills, or first experience bullets.")
     if missing:
         suggestions.append("Add missing JD keywords to the summary, skills, and the most relevant experience bullets.")
         suggestions.append("Mirror the JD's responsibility verbs in bullets where they fit the role narrative.")
@@ -153,13 +168,30 @@ def _suggestions(parsed_jd: ParsedJD, missing: list[str], recommendation: Resume
     return suggestions[:6]
 
 
-def _rewrite_strategy(parsed_jd: ParsedJD, missing: list[str]) -> str:
-    top_terms = ", ".join(missing[:8]) if missing else "the strongest JD keywords already present"
+def _rewrite_strategy(parsed_jd: ParsedJD, missing: list[str], placement_report) -> str:
+    placement_terms = [
+        *placement_report.missing_high_priority_keywords,
+        *placement_report.weakly_placed_keywords,
+    ]
+    top_terms = ", ".join(_dedupe_strings(placement_terms + missing)[:8]) if (placement_terms or missing) else "the strongest JD keywords already present"
     title = parsed_jd.job_title or "the target role"
     return (
         f"Position the resume directly for {title}; prioritize required skills and responsibilities, "
         f"then weave {top_terms} into the headline, summary, skills, and high-impact bullets."
     )
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for value in values:
+        cleaned = value.strip()
+        key = cleaned.casefold()
+        if not cleaned or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(cleaned)
+    return deduped
 
 
 def _normalize(value: str | None) -> str:

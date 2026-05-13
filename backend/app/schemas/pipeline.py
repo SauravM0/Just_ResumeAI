@@ -13,6 +13,7 @@ from app.schemas.alignment import ATSAlignmentReport
 from app.schemas.profile import MasterProfile
 from app.schemas.resume import ResumeRecommendation
 from app.schemas.scoring import ATSScore
+from app.services.ats_pre_check import ATSPreCheckResult
 
 
 EligibilityStatus = Literal["match", "partial_match", "hard_mismatch"]
@@ -20,7 +21,9 @@ PipelineStepState = Literal["pending", "success", "failed", "skipped"]
 
 
 class EligibilityResult(BaseModel):
-    status: EligibilityStatus
+    """Deprecated compatibility field; the MVP no longer gates resume generation."""
+
+    status: EligibilityStatus = "match"
     blocking_issues: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     matched_points: list[str] = Field(default_factory=list)
@@ -64,6 +67,7 @@ class PipelineGenerateResponse(BaseModel):
     recommendation: ResumeRecommendation
     ats_score: ATSScore
     alignment_report: ATSAlignmentReport
+    ats_pre_check: ATSPreCheckResult | None = None
     latex_source: str
     pdf: PipelinePdfResult = Field(default_factory=PipelinePdfResult)
     steps: list[PipelineStepStatus] = Field(default_factory=list)

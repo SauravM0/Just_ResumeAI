@@ -11,7 +11,14 @@ from pathlib import Path
 from jinja2 import Environment, FileSystemLoader
 
 from app.config import get_settings
-from app.schemas.resume import ResumeRecommendation, BulletStatus
+from app.schemas.resume import (
+    ResumeBullet,
+    ResumeExperienceEntry,
+    ResumeProjectEntry,
+    ResumeRecommendation,
+    ResumeSkillGroup,
+    BulletStatus,
+)
 from app.utils.latex_escape import escape_latex, sanitize_latex_url
 
 logger = logging.getLogger(__name__)
@@ -41,6 +48,95 @@ _MOJIBAKE_REPLACEMENTS = {
 }
 
 
+def sanitize_recommendation(recommendation: ResumeRecommendation) -> ResumeRecommendation:
+    """
+    Final sanitization pass before LaTeX rendering.
+
+    Ensures the recommendation cannot produce invalid LaTeX:
+    - Removes empty/corrupted bullets
+    - Removes nested bullet symbols
+    - Skips entries with no valid bullets
+    - Skips empty sections
+    - Guarantees no empty itemize environment is generated
+
+    This must run before render_latex in every code path that renders LaTeX.
+    """
+    import copy
+
+    rec = copy.deepcopy(recommendation)
+
+    if rec.summary is not None:
+        cleaned = _clean_pdf_text(rec.summary)
+        if not _is_valid_bullet_text(cleaned):
+            rec.summary = None
+        else:
+            rec.summary = cleaned
+
+    cleaned_experience: list[ResumeExperienceEntry] = []
+    for exp in rec.experience:
+        if not exp.included:
+            continue
+        valid_bullets: list[ResumeBullet] = []
+        for bullet in exp.bullets:
+            if bullet.status not in _ALLOWED_BULLET_STATUSES:
+                continue
+            for fragment in _split_bullet_fragments(bullet.text):
+                text = _clean_pdf_text(fragment)
+                if _is_valid_bullet_text(text):
+                    new_bullet = copy.deepcopy(bullet)
+                    new_bullet.text = text
+                    valid_bullets.append(new_bullet)
+        if valid_bullets:
+            exp.bullets = valid_bullets
+            cleaned_experience.append(exp)
+
+    rec.experience = cleaned_experience
+
+    cleaned_projects: list[ResumeProjectEntry] = []
+    for proj in rec.projects:
+        if not proj.included:
+            continue
+        valid_proj_bullets: list[ResumeBullet] = []
+        for bullet in proj.bullets:
+            if bullet.status not in _ALLOWED_BULLET_STATUSES:
+                continue
+            for fragment in _split_bullet_fragments(bullet.text):
+                text = _clean_pdf_text(fragment)
+                if _is_valid_bullet_text(text):
+                    new_bullet = copy.deepcopy(bullet)
+                    new_bullet.text = text
+                    valid_proj_bullets.append(new_bullet)
+        if valid_proj_bullets:
+            proj.bullets = valid_proj_bullets
+            cleaned_projects.append(proj)
+
+    rec.projects = cleaned_projects
+
+    cleaned_skills: list[ResumeSkillGroup] = []
+    for sg in rec.skills:
+        clean = [s for s in sg.skills if _is_valid_bullet_text(_clean_pdf_text(s))]
+        if clean:
+            sg.skills = clean
+            cleaned_skills.append(sg)
+
+    rec.skills = cleaned_skills
+    rec.achievements = [
+        item for item in rec.achievements
+        if item.included and _is_valid_bullet_text(_clean_pdf_text(item.title))
+    ]
+    rec.awards = [
+        item for item in rec.awards
+        if item.included and _is_valid_bullet_text(_clean_pdf_text(item.title))
+    ]
+    rec.custom_sections = [
+        section for section in rec.custom_sections
+        if section.included and _is_valid_bullet_text(_clean_pdf_text(section.title))
+        and _clean_inline_values(section.items)
+    ]
+
+    return rec
+
+
 def render_latex(recommendation: ResumeRecommendation) -> str:
     """
     Render the resume recommendation into LaTeX source code using the fixed template.
@@ -48,6 +144,7 @@ def render_latex(recommendation: ResumeRecommendation) -> str:
     Returns:
         LaTeX source string ready for PDF compilation.
     """
+    recommendation = sanitize_recommendation(recommendation)
     settings = get_settings()
     template_dir = Path(settings.LATEX_TEMPLATE_DIR)
     context = _build_template_context(recommendation)
@@ -143,11 +240,17 @@ def _build_template_context(rec: ResumeRecommendation) -> dict:
     for exp in rec.experience:
         if not exp.included:
             continue
+        bullets = _clean_bullet_texts(exp.bullets)
+        if not bullets:
+            continue
         experiences.append({
             "title": escape_latex(exp.title),
-            "company_line": escape_latex(exp.company + (f" | {exp.location}" if exp.location else "")),
+            # Keep company and location separate because the template displays
+            # argument 4 on the right; mixing them hurts scan order and wastes space.
+            "company_line": escape_latex(exp.company),
+            "location": escape_latex(exp.location or ""),
             "date_range": escape_latex(f"{exp.start_date} -- {exp.end_date or 'Present'}"),
-            "bullets": _clean_bullet_texts(exp.bullets),
+            "bullets": bullets,
         })
 
     education = []
@@ -181,10 +284,13 @@ def _build_template_context(rec: ResumeRecommendation) -> dict:
     for proj in rec.projects:
         if not proj.included:
             continue
+        proj_bullets = _clean_bullet_texts(proj.bullets)
+        if not proj_bullets:
+            continue
         projects.append({
             "name": escape_latex(proj.name),
             "technologies": ", ".join(_clean_inline_values(proj.technologies)),
-            "bullets": _clean_bullet_texts(proj.bullets),
+            "bullets": proj_bullets,
         })
 
     certifications = []
@@ -197,6 +303,29 @@ def _build_template_context(rec: ResumeRecommendation) -> dict:
             "date": escape_latex(cert.date or ""),
         })
 
+    achievements = []
+    for item in [*rec.achievements, *rec.awards]:
+        if not item.included:
+            continue
+        title = _clean_pdf_text(item.title)
+        if not _is_valid_bullet_text(title):
+            continue
+        achievements.append({
+            "title": escape_latex(title),
+            "issuer": escape_latex(item.issuer or ""),
+            "date": escape_latex(item.date or ""),
+            "description": escape_latex(_clean_pdf_text(item.description or "")),
+        })
+
+    custom_sections = []
+    for section in rec.custom_sections:
+        items = _clean_inline_values(section.items)
+        if section.included and items:
+            custom_sections.append({
+                "title": escape_latex(_clean_pdf_text(section.title)),
+                "items": items,
+            })
+
     return {
         "contact_name": escape_latex(rec.contact.full_name) if rec.contact else "",
         "contact_email": escape_latex(rec.contact.email) if rec.contact else "",
@@ -205,11 +334,19 @@ def _build_template_context(rec: ResumeRecommendation) -> dict:
         "contact_linkedin": sanitize_latex_url(rec.contact.linkedin_url or "") if rec.contact else "",
         "contact_github": sanitize_latex_url(rec.contact.github_url or "") if rec.contact else "",
         "contact_portfolio": sanitize_latex_url(rec.contact.portfolio_url or "") if rec.contact else "",
-        "summary": escape_latex(_clean_pdf_text(rec.summary or "")),
+        "summary": escape_latex(_clean_pdf_text(rec.summary)) if rec.summary and _is_valid_bullet_text(_clean_pdf_text(rec.summary)) else "",
         "target_title": escape_latex(_clean_pdf_text(rec.target_title)),
         "experiences": experiences,
         "education": education,
         "skills": skills,
         "projects": projects,
         "certifications": certifications,
+        "achievements": achievements,
+        "custom_sections": custom_sections,
+        "fresher_order": _is_fresher_order(rec),
     }
+
+
+def _is_fresher_order(rec: ResumeRecommendation) -> bool:
+    order = [section.casefold() for section in rec.section_order]
+    return "education" in order and "technical skills" in order and order.index("education") < order.index("technical skills")

@@ -6,6 +6,7 @@ from app.schemas.ats_planner import ATSKeywordPlannerOutput
 from app.schemas.jd import ParsedJD
 from app.schemas.profile import MasterProfile, Project, WorkExperience
 from app.schemas.resume import ResumeRecommendation
+from app.services.resume_strategy_service import build_resume_strategy
 
 
 def build_ats_keyword_plan(
@@ -16,6 +17,7 @@ def build_ats_keyword_plan(
     current_draft: ResumeRecommendation | None = None,
 ) -> ATSKeywordPlannerOutput:
     """Create an ATS optimization plan from JD signals and profile content."""
+    strategy = build_resume_strategy(parsed_jd, profile)
     priority_keywords = _priority_keywords(parsed_jd, emphasis)
     must_include_skills = _dedupe(
         [
@@ -49,7 +51,7 @@ def build_ats_keyword_plan(
         must_include_skills=must_include_skills,
         must_include_tools_platforms=must_include_tools,
         must_include_responsibilities=must_include_responsibilities,
-        suggested_section_ordering=_section_order(profile, target_pages),
+        suggested_section_ordering=strategy.section_order or _section_order(profile, target_pages),
         suggested_summary_themes=_summary_themes(parsed_jd, priority_keywords),
         suggested_project_emphasis=_project_emphasis(profile.projects, priority_keywords, must_include_responsibilities),
         missing_jd_keywords_from_current_draft=missing,

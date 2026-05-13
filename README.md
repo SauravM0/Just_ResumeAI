@@ -52,7 +52,7 @@ If you want to run without Docker:
 
 ## Environment Setup
 
-Create the backend env file:
+Create the backend env file from the safe example:
 
 ```bash
 cd backend
@@ -70,6 +70,8 @@ CORS_ORIGINS=["http://localhost:5173"]
 
 Notes:
 
+- Never commit or share `backend/.env`. It is ignored by git and should contain only local secrets.
+- `backend/.env.example` must stay in the repo as the safe template.
 - The backend will start even if `GEMINI_API_KEY` is empty, but AI-backed flows will fail or fall back depending on the endpoint.
 - The frontend uses `VITE_API_BASE`, which defaults to `http://localhost:8000/api/v1`.
 
@@ -227,3 +229,29 @@ Local PDF generation depends on LaTeX tooling. Install a distribution that provi
 - Backend sessions are persisted with SQLite under the backend output directory
 - Rendered files are written under `backend/output/`
 - The frontend stores the master profile client-side and uses the backend session ID for server-side flow state
+
+## Create a Clean Shareable Zip
+
+Before sharing the project, remove local secrets, generated files, dependency folders, build output, and caches. From the repo root on PowerShell:
+
+```powershell
+.\scripts\create-clean-zip.ps1
+```
+
+The script creates `JustResume-clean.zip` and excludes these paths:
+
+- `.git/`
+- `.env` and `.env.*` files, except safe `.env.example` templates
+- `backend/.env`
+- `backend/output/`
+- `backend/*.sqlite3`
+- `backend/**/__pycache__/`
+- `backend/**/*.pyc`
+- `backend/.pytest_cache/`
+- `.pytest_cache/`
+- `frontend/node_modules/`
+- `frontend/dist/`
+- `.DS_Store`
+- `*.log`
+
+If you are creating the zip manually, start from a clean working copy and confirm `backend/.env.example` is present while `backend/.env` is absent.

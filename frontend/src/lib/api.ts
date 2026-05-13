@@ -17,6 +17,7 @@ import type {
   RenderPdfResponse,
   ApproveGeneratePdfRequest,
   ApproveGeneratePdfResponse,
+  CompileLatexSourceRequest,
   PipelineGenerateRequest,
   PipelineGenerateResponse,
 } from '../types/resume';
@@ -175,10 +176,50 @@ export async function renderPdf(data: RenderPdfRequest): Promise<RenderPdfRespon
   });
 }
 
+async function requestBlob(endpoint: string, options: RequestInit = {}, timeoutMs = 120000): Promise<Blob> {
+  const url = `${API_BASE}${endpoint}`;
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Client-User-Id': getClientUserId(),
+        ...options.headers,
+      },
+      ...options,
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new ApiError(formatApiErrorMessage(body), res.status);
+    }
+    return res.blob();
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
+export async function compileLatexSource(
+  data: CompileLatexSourceRequest,
+): Promise<ApproveGeneratePdfResponse> {
+  return request('/resume/compile-latex-source', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  }, 180000);
+}
+
 export async function approveGeneratePdf(
   data: ApproveGeneratePdfRequest,
 ): Promise<ApproveGeneratePdfResponse> {
   return request('/resume/approve-generate-pdf', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  }, 180000);
+}
+
+export async function exportResumeDocx(data: ApproveGeneratePdfRequest): Promise<Blob> {
+  return requestBlob('/resume/export-docx', {
     method: 'POST',
     body: JSON.stringify(data),
   }, 180000);

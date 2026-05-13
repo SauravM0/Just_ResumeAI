@@ -3,6 +3,15 @@ User-scoped session service backed by SQLite.
 
 Sessions persist short-lived pipeline state only. The full master profile remains
 client-side and is not stored server-side.
+
+# INVESTIGATION NOTES
+# Profile flow: pipeline.py receives MasterProfile directly from the request,
+# passes that structured object to generate_recommendation(), and persists only
+# parsed_jd/recommendation/latex_source in this session table. The backend does
+# not re-parse a PDF on every generation. If weak PDF bullets appear in output,
+# they are coming from the client-provided MasterProfile, so the orchestrator now
+# flags weak bullets with a needs_rewrite prompt signal and instructs the composer
+# to rewrite them as raw material instead of copying them verbatim.
 """
 
 from __future__ import annotations

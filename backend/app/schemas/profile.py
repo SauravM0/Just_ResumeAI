@@ -56,6 +56,7 @@ class WorkExperience(BaseModel):
     is_current: bool = False
     description: Optional[str] = Field(None, description="Role summary")
     bullets: list[str] = Field(default_factory=list, description="Achievement bullets")
+    needs_rewrite: bool = Field(default=False, description="True when source bullets are weak raw material that AI should rewrite")
     tags: list[str] = Field(default_factory=list, description="User-assigned tags, e.g. 'leadership'")
 
 
@@ -81,6 +82,7 @@ class Project(BaseModel):
     url: Optional[str] = None
     technologies: list[str] = Field(default_factory=list)
     bullets: list[str] = Field(default_factory=list)
+    needs_rewrite: bool = Field(default=False, description="True when source bullets are weak raw material that AI should rewrite")
     start_date: Optional[str] = None
     end_date: Optional[str] = None
 

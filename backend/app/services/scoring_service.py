@@ -32,6 +32,7 @@ from app.schemas.scoring import (
     SkillScore,
     SectionScore,
 )
+from app.services.keyword_placement_service import analyze_keyword_placement, keyword_placement_score
 
 logger = logging.getLogger(__name__)
 
@@ -55,19 +56,31 @@ def compute_ats_score(
     keyword_score = _compute_keyword_score(recommendation, parsed_jd, ats_plan)
     skill_score = _compute_skill_score(recommendation, parsed_jd, ats_plan)
     readability = _compute_readability_score(recommendation)
-    format_score, format_issues = _compute_format_score(recommendation)
+    format_score, format_issues = _compute_format_score(recommendation, parsed_jd, ats_plan)
     section_score = _compute_section_score(recommendation)
     responsibility_score = _compute_responsibility_score(recommendation, parsed_jd)
     title_alignment_score = _compute_title_alignment_score(recommendation, parsed_jd)
+    placement_score = keyword_placement_score(
+        analyze_keyword_placement(recommendation, parsed_jd, ats_plan)
+    )
 
-    overall = (
-        keyword_score.coverage_percent * 0.30
-        + skill_score.required_coverage_percent * 0.20
-        + skill_score.preferred_coverage_percent * 0.10
-        + responsibility_score * 0.10
+    # Calibrated to external ATS scanners: hard keyword coverage must dominate,
+    # otherwise format/section completeness can create a falsely high score.
+    raw_overall = (
+        keyword_score.coverage_percent * 0.42
+        + skill_score.required_coverage_percent * 0.18
+        + skill_score.preferred_coverage_percent * 0.04
+        + responsibility_score * 0.07
         + title_alignment_score * 0.10
-        + format_score * 0.10
-        + section_score.score * 0.10
+        + placement_score * 0.15
+        + format_score * 0.02
+        + section_score.score * 0.02
+    )
+    overall = _calibrate_external_ats_score(
+        raw_overall=raw_overall,
+        keyword_score=keyword_score,
+        title_alignment_score=title_alignment_score,
+        skill_score=skill_score,
     )
 
     missing_keywords = list(keyword_score.critical_missing)
@@ -83,6 +96,10 @@ def compute_ats_score(
     if keyword_score.critical_missing:
         warnings.append(
             f"Missing keywords: {', '.join(keyword_score.critical_missing[:5])}"
+        )
+    if overall < raw_overall:
+        warnings.append(
+            "Score was capped because external ATS tools penalize missing exact hard skills more heavily than formatting quality."
         )
     if section_score.missing_sections:
         recommendations_list.append(
@@ -158,19 +175,26 @@ def _compute_skill_score(
     """Compute required and preferred skills coverage."""
     corpus = _build_resume_corpus(recommendation)
 
-    required_skills = list(parsed_jd.required_skills)
+    required_skills = _scoreable_skill_terms(list(parsed_jd.required_skills))
     if ats_plan:
-        required_skills.extend(ats_plan.must_include_skills)
+        required_skills.extend(_scoreable_skill_terms(ats_plan.must_include_skills))
 
+    required_skills = _dedupe_strings(required_skills)
     required_matched = 0
     for skill in required_skills:
-        if _keyword_in_text(skill, corpus["body"]):
+        # Check skills section first (highest ATS weight), then experience/projects.
+        # Both count as matched — the placement_score handles section weighting.
+        if _keyword_in_text(skill, corpus["skills"]):
+            required_matched += 1
+        elif _keyword_in_text(skill, corpus["experience"]) or _keyword_in_text(skill, corpus["projects"]):
             required_matched += 1
 
-    preferred_skills = list(parsed_jd.preferred_skills or [])
+    preferred_skills = _scoreable_skill_terms(list(parsed_jd.preferred_skills or []))
     preferred_matched = 0
     for skill in preferred_skills:
-        if _keyword_in_text(skill, corpus["body"]):
+        if _keyword_in_text(skill, corpus["skills"]):
+            preferred_matched += 1
+        elif _keyword_in_text(skill, corpus["experience"]) or _keyword_in_text(skill, corpus["projects"]):
             preferred_matched += 1
 
     return SkillScore(
@@ -230,7 +254,11 @@ def _compute_readability_score(recommendation: ResumeRecommendation) -> Readabil
     )
 
 
-def _compute_format_score(recommendation: ResumeRecommendation) -> tuple[float, list[str]]:
+def _compute_format_score(
+    recommendation: ResumeRecommendation,
+    parsed_jd: ParsedJD,
+    ats_plan: ATSKeywordPlannerOutput | None = None,
+) -> tuple[float, list[str]]:
     """Compute formatting/parseability score - penalize only structural issues."""
     penalties = 0.0
     issues: list[str] = []
@@ -245,8 +273,11 @@ def _compute_format_score(recommendation: ResumeRecommendation) -> tuple[float, 
     if not recommendation.summary:
         penalties += 10
         issues.append("Professional summary is missing.")
-    elif len(recommendation.summary.split()) > 70:
+    elif len(recommendation.summary.split()) < 60:
         penalties += 8
+        issues.append("Professional summary is too short to carry JD keywords.")
+    elif len(recommendation.summary.split()) > 120:
+        penalties += 5
         issues.append("Professional summary is too long for a one-page ATS resume.")
 
     included_experience = [exp for exp in recommendation.experience if exp.included]
@@ -273,8 +304,33 @@ def _compute_format_score(recommendation: ResumeRecommendation) -> tuple[float, 
         penalties += 20
         issues.append("Resume contains corrupted/non-ASCII characters that may break ATS parsing.")
 
+    if _has_keyword_stuffing(recommendation, parsed_jd, ats_plan):
+        penalties += 8
+        issues.append("Resume repeats the same high-priority keyword too often.")
+
     format_score = max(0.0, 100.0 - penalties)
     return format_score, _dedupe_strings(issues)
+
+
+def _has_keyword_stuffing(
+    recommendation: ResumeRecommendation,
+    parsed_jd: ParsedJD,
+    ats_plan: ATSKeywordPlannerOutput | None = None,
+) -> bool:
+    text = _build_resume_corpus(recommendation)["body"]
+    candidates = _critical_keywords(parsed_jd, ats_plan)[:20]
+    for keyword in candidates:
+        normalized = _normalize_keyword(keyword)
+        if not normalized or len(normalized) <= 2:
+            continue
+        pattern = (
+            re.compile(rf"(?<!\w){re.escape(normalized)}(?!\w)")
+            if " " in normalized
+            else re.compile(rf"\b{re.escape(normalized)}\b")
+        )
+        if len(pattern.findall(text)) > 5:
+            return True
+    return False
 
 
 def _has_corrupted_chars(recommendation: ResumeRecommendation) -> bool:
@@ -316,6 +372,12 @@ def _get_raw_resume_text(recommendation: ResumeRecommendation) -> str:
     for group in recommendation.skills:
         parts.append(group.category)
         parts.extend(group.skills)
+    for cert in recommendation.certifications:
+        if cert.included:
+            parts.extend([cert.name, cert.issuing_org or ""])
+    for item in [*recommendation.achievements, *recommendation.awards]:
+        if item.included:
+            parts.extend([item.title, item.issuer or "", item.description or ""])
     return " ".join(parts)
 
 
@@ -358,11 +420,45 @@ def _compute_section_score(recommendation: ResumeRecommendation) -> SectionScore
 
 
 def _compute_responsibility_score(recommendation: ResumeRecommendation, parsed_jd: ParsedJD) -> float:
-    """Compute responsibility coverage score."""
+    """
+    Compute responsibility coverage score using TOKEN OVERLAP — not exact phrase match.
+
+    ROOT CAUSE FIX: The old scorer did `_keyword_in_text(full_responsibility_sentence, body)`
+    which required the EXACT sentence to appear verbatim — guaranteeing 0% because
+    no resume ever copies JD sentences word-for-word. A responsibility like
+    "Design and implement scalable microservices using Docker" scored 0 even when
+    the resume said "Architected Docker-based microservices for..."
+
+    NEW approach: A responsibility is MATCHED if ≥3 of its meaningful tokens
+    (non-stopwords, ≥3 chars) appear anywhere in the resume body. This correctly
+    detects when a bullet addresses a responsibility using equivalent language.
+    """
     if not parsed_jd.responsibilities:
         return 100.0
-    corpus = _build_resume_corpus(recommendation)["body"]
-    matched = sum(1 for responsibility in parsed_jd.responsibilities if _keyword_in_text(responsibility, corpus))
+
+    corpus = _normalize_text(_build_resume_corpus(recommendation)["body"])
+    corpus_tokens = set(re.findall(r"\b[a-z0-9][a-z0-9+#./-]{2,}\b", corpus))
+
+    _STOPWORDS = {
+        "and", "the", "for", "with", "using", "that", "from", "this", "into",
+        "within", "across", "their", "about", "have", "will", "must", "should",
+        "able", "our", "your", "all", "any", "are", "can", "has", "its",
+    }
+
+    matched = 0
+    for responsibility in parsed_jd.responsibilities:
+        resp_tokens = set(re.findall(r"\b[a-z0-9][a-z0-9+#./-]{2,}\b",
+                                     _normalize_text(responsibility)))
+        meaningful = resp_tokens - _STOPWORDS
+        if not meaningful:
+            matched += 1
+            continue
+        # Require ≥3 meaningful tokens OR ≥50% of the tokens to match.
+        overlap = len(meaningful & corpus_tokens)
+        threshold = min(3, max(1, len(meaningful) // 2))
+        if overlap >= threshold:
+            matched += 1
+
     return round((matched / len(parsed_jd.responsibilities)) * 100, 1)
 
 
@@ -412,6 +508,34 @@ def _normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", lowered).strip()
 
 
+def _scoreable_skill_terms(values: list[str]) -> list[str]:
+    """
+    Keep skill scoring focused on actual hard skills/tools, not broad JD prose.
+
+    CHANGED: Removed certification/certified filter — JD cert requirements
+    (e.g., 'AWS Certified', 'RHCSA') must be counted in skill coverage scoring.
+    Filtering them out artificially suppressed required_coverage_percent.
+    """
+    blocked_fragments = (
+        "recent graduation",
+        "apprenticeship program",
+        "product experience engineering",
+        "customer experience",
+        "cross-functional",
+        "teams",
+    )
+    result: list[str] = []
+    for value in values:
+        cleaned = re.sub(r"\s+", " ", str(value or "")).strip()
+        lowered = cleaned.casefold()
+        if not cleaned or len(cleaned.split()) > 6:
+            continue
+        if any(fragment in lowered for fragment in blocked_fragments):
+            continue
+        result.append(cleaned)
+    return result
+
+
 def _build_resume_corpus(recommendation: ResumeRecommendation) -> dict[str, str]:
     """Build normalized section text used for keyword matching."""
     experience_parts: list[str] = []
@@ -446,6 +570,11 @@ def _build_resume_corpus(recommendation: ResumeRecommendation) -> dict[str, str]
         cert_parts.append(cert.name)
         if cert.issuing_org:
             cert_parts.append(cert.issuing_org)
+    achievement_parts: list[str] = []
+    for item in [*recommendation.achievements, *recommendation.awards]:
+        if not item.included:
+            continue
+        achievement_parts.extend([item.title, item.issuer or "", item.description or ""])
 
     return {
         "target_title": _normalize_text(recommendation.target_title or ""),
@@ -454,6 +583,7 @@ def _build_resume_corpus(recommendation: ResumeRecommendation) -> dict[str, str]
         "experience": _normalize_text(" ".join(experience_parts)),
         "projects": _normalize_text(" ".join(project_parts)),
         "certifications": _normalize_text(" ".join(cert_parts)),
+        "achievements": _normalize_text(" ".join(achievement_parts)),
         "body": _normalize_text(
             " ".join(
                 [
@@ -463,6 +593,7 @@ def _build_resume_corpus(recommendation: ResumeRecommendation) -> dict[str, str]
                     " ".join(project_parts),
                     " ".join(skills_parts),
                     " ".join(cert_parts),
+                    " ".join(achievement_parts),
                 ]
             )
         ),
@@ -482,7 +613,7 @@ def _match_keyword(keyword: str, corpus: dict[str, str]) -> tuple[bool, str]:
         else re.compile(rf"\b{re.escape(normalized_keyword)}\b")
     )
 
-    section_order = ["target_title", "summary", "skills", "experience", "projects", "certifications", "body"]
+    section_order = ["target_title", "summary", "skills", "experience", "projects", "certifications", "achievements", "body"]
     for section in section_order:
         if pattern.search(corpus[section]):
             return True, section
@@ -498,6 +629,17 @@ def _dedupe_jd_keywords(
     seen: set[str] = set()
 
     planner_values = [
+        parsed_jd.job_title,
+        *parsed_jd.required_skills,
+        *parsed_jd.programming_languages,
+        *parsed_jd.frameworks,
+        *parsed_jd.databases,
+        *parsed_jd.cloud_devops_tools,
+        *parsed_jd.tools_platforms,
+        *parsed_jd.domain_platform_terms,
+        *parsed_jd.deployment_environment_terms,
+        *parsed_jd.mobile_platform_terms,
+        *parsed_jd.important_exact_phrases,
         *(
             [
                 *ats_plan.priority_keywords,
@@ -549,6 +691,41 @@ def _critical_keywords(
         candidates.append(keyword.keyword.strip())
 
     return candidates
+
+
+def _calibrate_external_ats_score(
+    raw_overall: float,
+    keyword_score: KeywordScore,
+    title_alignment_score: float,
+    skill_score: SkillScore,
+) -> float:
+    """Cap optimistic internal scores to better mirror external ATS scanners."""
+    cap = 100.0
+    coverage = keyword_score.coverage_percent
+    missing = len(keyword_score.critical_missing)
+
+    # If exact JD keyword coverage is weak, external tools normally report a
+    # partial match even when formatting and sections are clean.
+    if coverage < 35:
+        cap = min(cap, 48.0)
+    elif coverage < 50:
+        cap = min(cap, 60.0)
+    elif coverage < 65:
+        cap = min(cap, 72.0)
+
+    if missing >= 15:
+        cap = min(cap, 52.0)
+    elif missing >= 8:
+        cap = min(cap, 58.0)
+    elif missing >= 4:
+        cap = min(cap, 68.0)
+
+    if title_alignment_score < 70:
+        cap = min(cap, 65.0)
+    if skill_score.required_coverage_percent < 50:
+        cap = min(cap, 70.0)
+
+    return min(raw_overall, cap)
 
 
 def _dedupe_strings(values: list[str]) -> list[str]:

@@ -6,7 +6,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useMutation } from '@tanstack/react-query';
 import { generateResumePipeline } from '../lib/api';
-import { getDefaultProfile } from '../lib/db';
+import { getDefaultProfile, saveRecentResumeSnapshot } from '../lib/db';
 import { sanitizeProfile } from '../lib/profile';
 import { useAppStore } from '../store/useAppStore';
 import type { MasterProfile } from '../types/profile';
@@ -19,6 +19,8 @@ export default function JDInput() {
   const navigate = useNavigate();
   const [rawJD, setRawJD] = useState('');
   const [blockingError, setBlockingError] = useState<string | null>(null);
+  const [strictOnePage, setStrictOnePage] = useState(true);
+  const [generatePdfAfterReview, setGeneratePdfAfterReview] = useState(false);
   const {
     setSessionId,
     setParsedJD,
@@ -26,26 +28,28 @@ export default function JDInput() {
     setAtsScore,
     setAlignmentReport,
     setLatexSource,
-    setEligibility,
     setPipelinePdf,
     setStep,
-    addWarning,
-    clearWarnings,
     setActiveProfile,
   } = useAppStore();
 
   const pipelineMutation = useMutation({
     mutationFn: generateResumePipeline,
     onSuccess: (data) => {
+      void saveRecentResumeSnapshot({
+        sessionId: data.session_id,
+        parsedJD: data.parsed_jd,
+        recommendation: data.recommendation,
+        atsScore: data.ats_score,
+        pipelinePdf: data.pdf,
+      });
       setSessionId(data.session_id);
       setParsedJD(data.parsed_jd);
       setRecommendation(data.recommendation);
       setAtsScore(data.ats_score);
       setAlignmentReport(data.alignment_report);
       setLatexSource(data.latex_source);
-      setEligibility(data.eligibility);
       setPipelinePdf(data.pdf);
-      data.warnings.forEach(addWarning);
       setStep('resume-review');
       navigate('/review');
     },
@@ -63,13 +67,12 @@ export default function JDInput() {
     const normalizedProfile = sanitizeProfile(savedProfile);
     setActiveProfile(normalizedProfile);
     setBlockingError(null);
-    clearWarnings();
     pipelineMutation.mutate({
       profile: normalizedProfile,
       raw_jd_text: rawJD,
       target_pages: 1,
-      allow_two_pages_for_senior: true,
-      generate_pdf: false,
+      allow_two_pages_for_senior: !strictOnePage,
+      generate_pdf: generatePdfAfterReview,
       additional_alignment_text: undefined,
     });
   };
@@ -80,23 +83,10 @@ export default function JDInput() {
   return (
     <div className="animate-fade-in">
       <div className="page-header">
-        <h1 className="page-title">Paste Job Description</h1>
+        <h1 className="page-title">Paste JD & Generate One-Page Resume</h1>
         <p className="page-subtitle">
-          Paste the full job description. Our AI will extract requirements, keywords, and scoring criteria.
+          Paste the job description and generate a tailored resume for review.
         </p>
-      </div>
-
-      {/* Pipeline indicator */}
-      <div className="pipeline-steps" style={{ marginBottom: 'var(--space-xl)' }}>
-        <div className="pipeline-step step-done"><span>✓</span><span>Profile</span></div>
-        <div className="pipeline-connector" />
-        <div className="pipeline-step step-active"><span>📋</span><span>Paste JD</span></div>
-        <div className="pipeline-connector" />
-        <div className="pipeline-step"><span>🔍</span><span>Analysis</span></div>
-        <div className="pipeline-connector" />
-        <div className="pipeline-step"><span>👁️</span><span>Review</span></div>
-        <div className="pipeline-connector" />
-        <div className="pipeline-step"><span>📥</span><span>Export</span></div>
       </div>
 
       <div className="card">
@@ -122,22 +112,38 @@ export default function JDInput() {
           </div>
         </div>
 
+        <div className="compact-settings" aria-label="Resume generation settings">
+          <label className="compact-setting">
+            <input
+              type="checkbox"
+              checked={strictOnePage}
+              onChange={(e) => setStrictOnePage(e.target.checked)}
+              disabled={pipelineMutation.isPending}
+            />
+            <span>Strict one-page resume</span>
+          </label>
+          <label className="compact-setting">
+            <input
+              type="checkbox"
+              checked={generatePdfAfterReview}
+              onChange={(e) => setGeneratePdfAfterReview(e.target.checked)}
+              disabled={pipelineMutation.isPending}
+            />
+            <span>Generate PDF after review</span>
+          </label>
+          <label className="compact-setting compact-setting-disabled">
+            <input type="checkbox" disabled />
+            <span>Cover letter after resume</span>
+            <span className="badge badge-neutral">Later</span>
+          </label>
+        </div>
+
         {pipelineMutation.isPending && (
-          <div className="card" style={{ marginBottom: 'var(--space-md)' }}>
-            <div className="card-title" style={{ marginBottom: 'var(--space-sm)' }}>Generating ATS Resume</div>
-            <div className="pipeline-steps">
-              {[
-                { label: 'Analyzing JD', icon: '📋' },
-                { label: 'Optimizing keywords', icon: '🔑' },
-                { label: 'Generating ATS resume', icon: '📝' },
-                { label: 'Scoring & alignment', icon: '📊' },
-                { label: 'Preparing PDF-ready content', icon: '✨' },
-              ].map((step, index) => (
-                <div key={step.label} className={`pipeline-step ${index === 0 ? 'step-active' : ''}`}>
-                  <span>{index === 0 ? <span className="spinner" /> : step.icon}</span>
-                  <span>{step.label}</span>
-                </div>
-              ))}
+          <div className="generation-status" style={{ marginBottom: 'var(--space-md)' }}>
+            <span className="spinner" />
+            <div>
+              <strong>Generating ATS resume...</strong>
+              <p>Analyzing JD → Optimizing keywords → Writing resume → Scoring match</p>
             </div>
           </div>
         )}
@@ -178,28 +184,25 @@ export default function JDInput() {
             {pipelineMutation.isPending ? (
               <>
                 <span className="spinner" />
-                Generating ATS Resume...
+                Generating ATS resume...
               </>
             ) : (
-              'Generate ATS Resume'
+              'Generate One-Page ATS Resume'
             )}
           </button>
         </div>
       </div>
 
-      {/* Tips */}
       <div className="card" style={{ marginTop: 'var(--space-lg)' }}>
-        <div className="card-title" style={{ marginBottom: 'var(--space-md)' }}>💡 Tips for Best Results</div>
+        <div className="card-title" style={{ marginBottom: 'var(--space-md)' }}>Tips for Best Results</div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: 'var(--space-md)' }}>
           {[
-            { icon: '✅', text: 'Include the complete job posting — title, requirements, and responsibilities' },
-            { icon: '✅', text: 'Keep formatting — bullet points and sections help our AI understand structure' },
-            { icon: '⚠️', text: 'Vague JDs like "looking for a team player" will get quality warnings' },
-            { icon: '❌', text: 'Don\'t paste just a job title — we need the full description' },
+            'Paste complete JD for best keyword extraction.',
+            'Include responsibilities and required skills.',
           ].map((tip, i) => (
             <div key={i} style={{ display: 'flex', gap: 'var(--space-sm)', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-              <span>{tip.icon}</span>
-              <span>{tip.text}</span>
+              <span>✓</span>
+              <span>{tip}</span>
             </div>
           ))}
         </div>

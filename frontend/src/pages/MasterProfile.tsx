@@ -7,9 +7,9 @@ import { useEffect, useState, useCallback } from 'react';
 import { getDefaultProfile, saveProfile, createBlankProfile } from '../lib/db';
 import { sanitizeProfile } from '../lib/profile';
 import { useAppStore } from '../store/useAppStore';
-import type { MasterProfile, WorkExperience, Education, Skill, Project } from '../types/profile';
+import type { MasterProfile, WorkExperience, Education, Skill, Project, Certification, Award } from '../types/profile';
 
-type Tab = 'contact' | 'experience' | 'education' | 'skills' | 'projects';
+type Tab = 'contact' | 'experience' | 'education' | 'skills' | 'projects' | 'credentials';
 
 export default function MasterProfilePage() {
   const [profile, setProfile] = useState<MasterProfile | null>(null);
@@ -62,6 +62,7 @@ export default function MasterProfilePage() {
     { key: 'education', label: 'Education', icon: '🎓' },
     { key: 'skills', label: 'Skills', icon: '⚡' },
     { key: 'projects', label: 'Projects', icon: '🚀' },
+    { key: 'credentials', label: 'Certs & Awards', icon: '🏆' },
   ];
 
   return (
@@ -96,6 +97,7 @@ export default function MasterProfilePage() {
         {activeTab === 'education' && <EducationForm profile={profile} onChange={updateProfile} />}
         {activeTab === 'skills' && <SkillsForm profile={profile} onChange={updateProfile} />}
         {activeTab === 'projects' && <ProjectsForm profile={profile} onChange={updateProfile} />}
+        {activeTab === 'credentials' && <CredentialsForm profile={profile} onChange={updateProfile} />}
       </div>
     </div>
   );
@@ -487,6 +489,145 @@ function ProjectsForm({ profile, onChange }: { profile: MasterProfile; onChange:
         </div>
       ))}
       <button className="btn btn-secondary" onClick={addProject}>+ Add Project</button>
+    </div>
+  );
+}
+
+function CredentialsForm({ profile, onChange }: { profile: MasterProfile; onChange: (u: Partial<MasterProfile>) => void }) {
+  const certifications = profile.certifications;
+  const awards = profile.awards;
+
+  const addCertification = () => {
+    onChange({
+      certifications: [
+        ...certifications,
+        { id: crypto.randomUUID(), name: '', issuing_org: '', issue_date: '', expiry_date: '', credential_id: '', url: '' },
+      ],
+    });
+  };
+
+  const updateCertification = (index: number, updates: Partial<Certification>) => {
+    const updated = [...certifications];
+    updated[index] = { ...updated[index], ...updates };
+    onChange({ certifications: updated });
+  };
+
+  const removeCertification = (index: number) => {
+    onChange({ certifications: certifications.filter((_, i) => i !== index) });
+  };
+
+  const addAward = () => {
+    onChange({
+      awards: [
+        ...awards,
+        { id: crypto.randomUUID(), title: '', issuer: '', date: '', description: '' },
+      ],
+    });
+  };
+
+  const updateAward = (index: number, updates: Partial<Award>) => {
+    const updated = [...awards];
+    updated[index] = { ...updated[index], ...updates };
+    onChange({ awards: updated });
+  };
+
+  const removeAward = (index: number) => {
+    onChange({ awards: awards.filter((_, i) => i !== index) });
+  };
+
+  return (
+    <div>
+      <div className="card" style={{ marginBottom: 'var(--space-md)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 'var(--space-lg)' }}>
+          <div>
+            <div className="card-title">Certifications</div>
+            <div className="card-subtitle">Licenses, cloud badges, platform certificates, and course certificates.</div>
+          </div>
+          <button className="btn btn-secondary btn-sm" onClick={addCertification}>+ Add Certification</button>
+        </div>
+
+        {certifications.map((cert, i) => (
+          <div key={cert.id} className="card" style={{ marginBottom: 'var(--space-sm)', padding: 'var(--space-md)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 'var(--space-md)' }}>
+              <div className="card-title">Certification #{i + 1}</div>
+              <button className="btn btn-danger btn-sm" onClick={() => removeCertification(i)}>Remove</button>
+            </div>
+            <div className="form-row">
+              <div className="form-group">
+                <label className="form-label">Certification Name *</label>
+                <input className="form-input" value={cert.name} onChange={(e) => updateCertification(i, { name: e.target.value })} placeholder="AWS Certified Cloud Practitioner" />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Issuer</label>
+                <input className="form-input" value={cert.issuing_org || ''} onChange={(e) => updateCertification(i, { issuing_org: e.target.value })} placeholder="Amazon Web Services" />
+              </div>
+            </div>
+            <div className="form-row">
+              <div className="form-group">
+                <label className="form-label">Issue Date</label>
+                <input className="form-input" type="month" value={cert.issue_date || ''} onChange={(e) => updateCertification(i, { issue_date: e.target.value })} />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Credential ID</label>
+                <input className="form-input" value={cert.credential_id || ''} onChange={(e) => updateCertification(i, { credential_id: e.target.value })} placeholder="Optional credential ID" />
+              </div>
+            </div>
+            <div className="form-group">
+              <label className="form-label">Credential URL</label>
+              <input className="form-input" value={cert.url || ''} onChange={(e) => updateCertification(i, { url: e.target.value })} placeholder="https://..." />
+            </div>
+          </div>
+        ))}
+
+        {certifications.length === 0 && (
+          <div className="empty-state" style={{ padding: 'var(--space-lg)' }}>
+            <div className="empty-title">No certifications yet</div>
+          </div>
+        )}
+      </div>
+
+      <div className="card">
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 'var(--space-lg)' }}>
+          <div>
+            <div className="card-title">Achievements & Awards</div>
+            <div className="card-subtitle">Hackathons, recognitions, scholarships, honors, and competition results.</div>
+          </div>
+          <button className="btn btn-secondary btn-sm" onClick={addAward}>+ Add Achievement</button>
+        </div>
+
+        {awards.map((award, i) => (
+          <div key={award.id} className="card" style={{ marginBottom: 'var(--space-sm)', padding: 'var(--space-md)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 'var(--space-md)' }}>
+              <div className="card-title">Achievement #{i + 1}</div>
+              <button className="btn btn-danger btn-sm" onClick={() => removeAward(i)}>Remove</button>
+            </div>
+            <div className="form-row">
+              <div className="form-group">
+                <label className="form-label">Title *</label>
+                <input className="form-input" value={award.title} onChange={(e) => updateAward(i, { title: e.target.value })} placeholder="3rd Prize Hackathon" />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Issuer / Organization</label>
+                <input className="form-input" value={award.issuer || ''} onChange={(e) => updateAward(i, { issuer: e.target.value })} placeholder="College Innovation Cell" />
+              </div>
+            </div>
+            <div className="form-group">
+              <label className="form-label">Date</label>
+              <input className="form-input" type="month" value={award.date || ''} onChange={(e) => updateAward(i, { date: e.target.value })} />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Description</label>
+              <textarea className="form-textarea" value={award.description || ''} onChange={(e) => updateAward(i, { description: e.target.value })} placeholder="Short evidence, result, or metric..." rows={2} />
+            </div>
+          </div>
+        ))}
+
+        {awards.length === 0 && (
+          <div className="empty-state" style={{ padding: 'var(--space-lg)' }}>
+            <div className="empty-title">No achievements yet</div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

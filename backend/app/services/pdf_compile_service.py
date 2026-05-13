@@ -20,6 +20,27 @@ from app.config import get_settings
 logger = logging.getLogger(__name__)
 
 
+def _sanitize_excerpt(excerpt: str | None) -> str | None:
+    if not excerpt:
+        return excerpt
+    settings = get_settings()
+    if not settings.DEBUG:
+        output_dir = str(Path(settings.LATEX_OUTPUT_DIR))
+        excerpt = excerpt.replace(output_dir, "[output]")
+        tmpdir_prefix = tempfile.gettempdir()
+        excerpt = excerpt.replace(tmpdir_prefix, "[tmp]")
+    return excerpt
+
+
+def _safe_tex_path(path: str | None) -> str | None:
+    if not path:
+        return None
+    settings = get_settings()
+    if settings.DEBUG:
+        return path
+    return Path(path).name
+
+
 class PDFCompileError(Exception):
     """Raised when LaTeX compilation fails."""
 
@@ -37,7 +58,7 @@ class PDFCompileError(Exception):
         self.errors = errors
         self.generated_tex_path = generated_tex_path
         self.warnings = warnings or []
-        self.pdflatex_excerpt = pdflatex_excerpt
+        self.pdflatex_excerpt = _sanitize_excerpt(pdflatex_excerpt)
         self.line_number = line_number
         self.raw_output = raw_output
 
@@ -143,7 +164,7 @@ async def compile_pdf(
         raise PDFCompileError(
             "Local pdflatex is not installed. Install TeX Live / pdflatex on the server.",
             errors=["Local pdflatex is not installed. Install TeX Live / pdflatex on the server."],
-            generated_tex_path=str(generated_tex_path),
+            generated_tex_path=_safe_tex_path(str(generated_tex_path)),
         )
 
     pdf_filename = f"resume_{session_id}_{uuid.uuid4().hex[:6]}.pdf"
@@ -179,7 +200,7 @@ async def compile_pdf(
                     raise PDFCompileError(
                         "pdflatex timed out",
                         errors=["PDF compilation timed out after 45 seconds."],
-                        generated_tex_path=str(generated_tex_path),
+                        generated_tex_path=_safe_tex_path(str(generated_tex_path)),
                     ) from exc
 
                 if process.returncode != 0:
@@ -203,7 +224,7 @@ async def compile_pdf(
                     raise PDFCompileError(
                         f"pdflatex exited with code {process.returncode}",
                         errors=_friendly_latex_errors(errors, line_number),
-                        generated_tex_path=str(generated_tex_path),
+                        generated_tex_path=_safe_tex_path(str(generated_tex_path)),
                         warnings=warnings,
                         pdflatex_excerpt=excerpt,
                         line_number=line_number,
@@ -214,7 +235,7 @@ async def compile_pdf(
                 raise PDFCompileError(
                     "PDF file was not created",
                     errors=["Unknown compilation error"],
-                    generated_tex_path=str(generated_tex_path),
+                    generated_tex_path=_safe_tex_path(str(generated_tex_path)),
                 )
 
             warnings = _parse_latex_warnings(log_path) if log_path.exists() else []
@@ -230,7 +251,7 @@ async def compile_pdf(
         raise PDFCompileError(
             f"Compilation failed: {e}",
             errors=[str(e)],
-            generated_tex_path=str(generated_tex_path),
+            generated_tex_path=_safe_tex_path(str(generated_tex_path)),
         )
 
 
