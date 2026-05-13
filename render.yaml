@@ -3,8 +3,8 @@ services:
     name: justresume-backend
     runtime: docker
     plan: free
-    dockerContext: ./backend
-    dockerfilePath: ./backend/Dockerfile
+    dockerContext: .
+    dockerfilePath: ./Dockerfile
     healthCheckPath: /api/v1/health
     envVars:
       - key: DEBUG
