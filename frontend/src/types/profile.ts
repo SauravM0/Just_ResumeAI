@@ -1,6 +1,6 @@
 /**
  * Master Profile types — mirrors backend schemas/profile.py exactly.
- * These types are the contract between IndexedDB, frontend UI, and backend API.
+ * These types are the contract between the frontend UI and backend API.
  */
 
 export type SkillLevel = 'beginner' | 'intermediate' | 'advanced' | 'expert';

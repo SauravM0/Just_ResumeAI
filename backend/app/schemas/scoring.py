@@ -84,5 +84,5 @@ class ATSScore(BaseModel):
 
 class ValidateResponse(BaseModel):
     """POST /api/v1/resume/validate response."""
-    session_id: str
+    generation_id: str
     ats_score: ATSScore

@@ -8,7 +8,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 from .alignment import ATSAlignmentReport
 from .profile import MasterProfile
@@ -151,7 +151,7 @@ class ResumeRecommendation(BaseModel):
     The complete resume recommendation from the AI pipeline.
     This is what the user reviews before final rendering.
     """
-    session_id: str
+    generation_id: str = Field(validation_alias=AliasChoices("generation_id", "session_id"))
     target_title: str = Field(..., description="Tailored resume title/headline")
     summary: Optional[str] = Field(None, description="AI-generated professional summary")
     contact: ResumeContactInfo = Field(default_factory=ResumeContactInfo)
@@ -179,7 +179,7 @@ class ResumeRecommendation(BaseModel):
 
 class ResumeRecommendRequest(BaseModel):
     """POST /api/v1/resume/recommend"""
-    session_id: str
+    generation_id: str = Field(validation_alias=AliasChoices("generation_id", "session_id"))
     profile: MasterProfile
     emphasis: Optional[str] = None
     additional_alignment_text: Optional[str] = Field(
@@ -201,7 +201,7 @@ class ResumeRecommendResponse(BaseModel):
 
 class ResumeRegenerateRequest(BaseModel):
     """POST /api/v1/resume/regenerate — re-run with updated preferences."""
-    session_id: str
+    generation_id: str = Field(validation_alias=AliasChoices("generation_id", "session_id"))
     profile: MasterProfile
     emphasis: Optional[str] = None
     additional_alignment_text: Optional[str] = Field(
@@ -221,57 +221,7 @@ class ResumeRegenerateRequest(BaseModel):
 
 class ResumeValidateRequest(BaseModel):
     """POST /api/v1/resume/validate — run ATS validation."""
-    session_id: str
+    generation_id: str = Field(validation_alias=AliasChoices("generation_id", "session_id"))
     recommendation: ResumeRecommendation
 
 
-class ResumeRenderLatexRequest(BaseModel):
-    """POST /api/v1/resume/render-latex"""
-    session_id: str
-    recommendation: ResumeRecommendation
-
-
-class ResumeRenderLatexResponse(BaseModel):
-    """LaTeX source code response."""
-    latex_source: str
-    warnings: list[str] = Field(default_factory=list)
-
-
-class ResumeRenderPdfRequest(BaseModel):
-    """POST /api/v1/resume/render-pdf"""
-    session_id: str
-
-
-class ResumeCompileLatexSourceRequest(BaseModel):
-    """POST /api/v1/resume/compile-latex-source"""
-    session_id: str
-    latex_source: str = Field(..., min_length=1)
-
-
-class ResumeApproveGeneratePdfRequest(BaseModel):
-    """POST /api/v1/resume/approve-generate-pdf"""
-    session_id: str
-    recommendation: ResumeRecommendation
-
-
-class ResumeRenderPdfResponse(BaseModel):
-    """PDF compilation result."""
-    pdf_url: str = Field(..., description="URL to download the compiled PDF")
-    compile_success: bool = True
-    compile_errors: list[str] = Field(default_factory=list)
-    compile_warnings: list[str] = Field(default_factory=list)
-    generated_tex_path: Optional[str] = None
-    pdflatex_excerpt: Optional[str] = None
-    line_number: Optional[int] = None
-
-
-class ResumeApproveGeneratePdfResponse(BaseModel):
-    """Combined LaTeX rendering + PDF compilation result."""
-    latex_source: str = ""
-    pdf_url: str = ""
-    compile_success: bool = True
-    compile_errors: list[str] = Field(default_factory=list)
-    compile_warnings: list[str] = Field(default_factory=list)
-    generated_tex_path: Optional[str] = None
-    pdflatex_excerpt: Optional[str] = None
-    line_number: Optional[int] = None

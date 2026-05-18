@@ -6,8 +6,10 @@ Design:
 - The expected JSON schema is embedded in the prompt (not via response_schema,
   which doesn't support Pydantic defaults).
 - Responses are validated against a Pydantic model.
-- On validation failure, a single retry with a repair prompt is attempted.
-- On second failure, a structured error is returned instead of crashing.
+- On transient failure (timeout, 429, 5xx), retries with exponential backoff + jitter.
+- On validation failure, retries with a repair prompt.
+- After exhausting retries, raises GeminiClientError with a safe message.
+- Never logs raw AI output (contains user resume data).
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 from typing import TypeVar, Type
 
 from google import genai
@@ -29,14 +32,8 @@ T = TypeVar("T", bound=BaseModel)
 
 
 def _schema_to_prompt_description(model: Type[BaseModel]) -> str:
-    """
-    Generate a compact JSON schema description from a Pydantic model
-    to embed in the prompt. This avoids the Gemini API limitation
-    where response_schema rejects models with default values.
-    """
     schema = model.model_json_schema()
 
-    # Strip internal Pydantic metadata that adds noise
     def _clean(d: dict) -> dict:
         d.pop("title", None)
         d.pop("description", None)
@@ -59,19 +56,24 @@ def _schema_to_prompt_description(model: Type[BaseModel]) -> str:
 class GeminiClientError(Exception):
     """Raised when Gemini call fails after retries."""
 
-    def __init__(self, message: str, raw_response: str | None = None):
+    def __init__(self, message: str):
         super().__init__(message)
-        self.raw_response = raw_response
 
 
 class GeminiClient:
     """
     Wrapper around the Gemini GenAI SDK.
     Enforces structured JSON output + Pydantic validation + retry.
+    Reads all config from environment at construction time.
     """
 
     def __init__(self):
         settings = get_settings()
+        if not settings.GEMINI_API_KEY:
+            raise GeminiClientError(
+                "Gemini API key is not configured. "
+                "Set GEMINI_API_KEY in your environment or .env file."
+            )
         self._client = genai.Client(api_key=settings.GEMINI_API_KEY)
         self._model = settings.GEMINI_MODEL
         self._max_retries = settings.GEMINI_MAX_RETRIES
@@ -90,10 +92,6 @@ class GeminiClient:
         """
         Send a prompt to Gemini and parse the response into a Pydantic model.
 
-        Strategy: We use response_mime_type="application/json" for JSON-mode,
-        but embed the schema in the prompt instead of using response_schema
-        (which rejects Pydantic models with default field values).
-
         Args:
             prompt: The user/task prompt.
             response_model: Pydantic model class to validate the JSON output against.
@@ -108,7 +106,6 @@ class GeminiClient:
         """
         temp = temperature if temperature is not None else self._temperature
 
-        # Embed schema in prompt instead of response_schema
         schema_text = _schema_to_prompt_description(response_model)
         schema_instruction = (
             f"\n\nYou MUST respond with ONLY valid JSON matching this exact schema:\n"
@@ -132,7 +129,7 @@ class GeminiClient:
         for attempt in range(total_attempts):
             try:
                 logger.info(
-                    "Calling Gemini model=%s attempt=%s/%s response_model=%s",
+                    "Calling Gemini model=%s attempt=%s/%s model=%s",
                     self._model,
                     attempt + 1,
                     total_attempts,
@@ -148,29 +145,30 @@ class GeminiClient:
                 )
                 raw_text = response.text
                 if not raw_text:
-                    raise GeminiClientError("Gemini returned empty response")
+                    raise GeminiClientError("Gemini returned an empty response. Please retry.")
 
-                # Parse and validate
                 parsed = _parse_json_object(raw_text)
                 return response_model.model_validate(parsed)
 
             except (json.JSONDecodeError, ValidationError) as e:
                 error_msg = str(e)
+                response_len = len(raw_text or "")
                 logger.warning(
-                    "Gemini response validation failed model=%s attempt=%s/%s error=%s raw=%s",
+                    "Gemini response validation failed model=%s attempt=%s/%s error=%s response_len=%s",
                     self._model,
                     attempt + 1,
                     total_attempts,
                     error_msg,
-                    (raw_text or "")[:1000],
+                    response_len,
                 )
                 if attempt >= self._max_retries:
                     raise GeminiClientError(
-                        f"Failed to get valid response after {1 + self._max_retries} attempts: {error_msg}",
-                        raw_response=raw_text,
-                )
+                        f"AI response could not be processed after {1 + self._max_retries} attempts. "
+                        f"Please retry."
+                    )
                 await asyncio.sleep(self._backoff_delay(attempt))
-            except asyncio.TimeoutError as e:
+
+            except asyncio.TimeoutError:
                 error_msg = f"Gemini call timed out after {self._timeout} seconds"
                 logger.warning(
                     "Gemini timeout model=%s attempt=%s/%s timeout=%ss",
@@ -180,31 +178,42 @@ class GeminiClient:
                     self._timeout,
                 )
                 if attempt >= self._max_retries:
-                    raise GeminiClientError(error_msg, raw_response=raw_text) from e
+                    raise GeminiClientError(
+                        f"AI service did not respond in time after {1 + self._max_retries} attempts. "
+                        f"Please retry."
+                    )
                 await asyncio.sleep(self._backoff_delay(attempt))
+
             except GeminiClientError:
                 raise
+
             except Exception as e:
                 if self._is_transient_error(e) and attempt < self._max_retries:
                     is_quota = "429" in str(e).upper() or "RESOURCE_EXHAUSTED" in str(e).upper()
                     logger.warning(
-                        "Transient Gemini API error on attempt %s/%s: %s (is_quota=%s)",
+                        "Transient Gemini API error attempt=%s/%s is_quota=%s",
                         attempt + 1,
                         total_attempts,
-                        e,
-                        is_quota
+                        is_quota,
                     )
                     await asyncio.sleep(self._backoff_delay(attempt, is_quota))
                     continue
 
-                logger.error("Gemini API error model=%s attempt=%s/%s: %s", self._model, attempt + 1, total_attempts, e)
-                raise GeminiClientError(f"Gemini API call failed: {e}")
+                logger.error(
+                    "Gemini API error model=%s attempt=%s/%s",
+                    self._model,
+                    attempt + 1,
+                    total_attempts,
+                )
+                raise GeminiClientError(
+                    "AI service is temporarily unavailable. Please retry later."
+                )
 
-        # Shouldn't reach here, but safety net
-        raise GeminiClientError("Exhausted retries", raw_response=raw_text)
+        raise GeminiClientError(
+            "AI service is temporarily unavailable after exhausting retries. Please retry later."
+        )
 
     def _build_repair_prompt(self, original_prompt: str, bad_response: str | None, error: str) -> str:
-        """Build a repair prompt that includes the validation error for retry."""
         return (
             f"Your previous response was invalid JSON or failed schema validation.\n"
             f"Error: {error}\n\n"
@@ -214,18 +223,11 @@ class GeminiClient:
         )
 
     def _backoff_delay(self, attempt: int, is_quota: bool = False) -> float:
-        """Calculate backoff delay. Quota errors wait significantly longer."""
         base = self._retry_base_delay
         if is_quota:
-            # For 429s, start with at least 5 seconds and double
             base = max(base, 5.0)
-        
         delay = min(base * (2 ** attempt), self._retry_max_delay)
-        
-        # Add a bit of jitter
-        import random
         delay += random.uniform(0, 1.0)
-        
         return delay
 
     def _is_transient_error(self, error: Exception) -> bool:
@@ -268,7 +270,6 @@ def _parse_json_object(raw_text: str) -> dict:
         return parsed
 
 
-# Module-level singleton
 _client: GeminiClient | None = None
 
 
@@ -278,3 +279,9 @@ def get_gemini_client() -> GeminiClient:
     if _client is None:
         _client = GeminiClient()
     return _client
+
+
+def reset_gemini_client() -> None:
+    """Reset the singleton (for testing or config changes)."""
+    global _client
+    _client = None

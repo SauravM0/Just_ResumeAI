@@ -1,6 +1,6 @@
 """
 Master Profile schemas — the single source of truth for user data.
-These schemas mirror the IndexedDB structure on the frontend.
+These schemas mirror the frontend master profile structure.
 The backend receives a profile payload per-request; it never persists it.
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import date
 from enum import Enum
 from typing import Optional
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 
@@ -139,7 +140,7 @@ class Award(BaseModel):
 class MasterProfile(BaseModel):
     """
     The complete master profile.
-    Primary storage is client-side IndexedDB.
+    Primary storage is the Supabase-backed user profile API.
     Sent to backend per-request for AI processing.
     """
     id: str = Field(..., description="Client-generated UUID for the profile")
@@ -167,3 +168,19 @@ class MasterProfile(BaseModel):
 class ProfilePayload(BaseModel):
     """Wrapper for sending profile data to the backend."""
     profile: MasterProfile
+
+
+class ProfileUpdateRequest(BaseModel):
+    """PUT /api/v1/profile/me request."""
+    profile_json: MasterProfile
+
+
+class ProfileResponse(BaseModel):
+    """GET/PUT /api/v1/profile/me response."""
+    id: UUID
+    user_id: UUID
+    profile_json: MasterProfile | None = None
+    profile_completion_score: int = 0
+    status: str = "ready"
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None

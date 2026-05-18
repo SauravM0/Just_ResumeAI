@@ -1,40 +1,47 @@
-# JustResume AI
+# JustResume AI Frontend
 
-This repo is split into:
+Vite + React client for JustResume AI.
 
-- `frontend/`: Vite + React client
-- `backend/`: FastAPI API and LaTeX/PDF pipeline
+## Local Setup
 
-## Required Backend Environment Variables
-
-Create `backend/.env` from `backend/.env.example` and set the values before running the backend.
-
-Required:
-
-- `GEMINI_API_KEY`: Google Gemini API key used by the active AI endpoints
-
-Common local defaults:
-
-- `GEMINI_MODEL=gemini-2.5-flash`
-- `DEBUG=true`
-- `CORS_ORIGINS=["http://localhost:5173"]`
-- Vercel production frontend: set `VITE_API_BASE=https://your-backend.onrender.com/api/v1`
-- Render production backend: set `CORS_ORIGINS=https://your-frontend.vercel.app`
-
-Notes:
-
-- No real API keys or secrets should be committed to the repo.
-- The active backend config falls back to an empty `GEMINI_API_KEY`, so runtime does not depend on a committed secret.
-- PDF compilation also requires a local LaTeX toolchain such as `pdflatex`.
-
-
-cd "/mnt/data/justresume/Just resume/backend"
-python -m venv .venv
-# activate venv
-pip install -r requirements.txt
-python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
-
-cd "/mnt/data/justresume/Just resume/frontend"
+```bash
+cp .env.example .env
 npm install
 npm run dev
+```
+
+Local default:
+
+```env
+VITE_API_BASE=http://localhost:8000/api/v1
+VITE_SUPABASE_URL=https://your-project.supabase.co
+VITE_SUPABASE_ANON_KEY=your_anon_key
+```
+
+Production builds must set `VITE_API_BASE`; the app only falls back to localhost during Vite dev.
+
+## Google OAuth
+
+The app uses Supabase Auth with Google OAuth. In Supabase, enable Google under Authentication Providers and add these redirect URLs:
+
+```text
+http://localhost:5173/dashboard
+https://your-frontend-domain/dashboard
+```
+
+Only use the Supabase anon key in frontend env files. Never expose the service role key to Vite.
+
+## Safety Notes
+
+- Do not commit `frontend/.env`.
+- Do not commit `node_modules/`, `dist/`, or `coverage/`.
+- Backend API requests include the Supabase access token as `Authorization: Bearer <access_token>`.
+
+## Commands
+
+```bash
+npm run build
+npm run lint
+npm run preview
+```
 

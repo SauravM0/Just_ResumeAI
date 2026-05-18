@@ -131,14 +131,14 @@ def _assert_no_empty_itemize(latex_source: str) -> None:
 
 async def compile_pdf(
     latex_source: str,
-    session_id: str,
+    generation_id: str,
 ) -> tuple[str, list[str]]:
     """
     Compile LaTeX source to PDF.
 
     Args:
         latex_source: Full LaTeX document source.
-        session_id: Session ID for output file naming.
+        generation_id: Supabase generation ID for output file naming.
 
     Returns:
         Tuple of (pdf_file_path, compile_warnings).
@@ -146,13 +146,13 @@ async def compile_pdf(
     Raises:
         PDFCompileError: If compilation fails.
     """
-    cleanup_old_output_files(max_age_hours=24, keep_current_session_id=session_id)
+    cleanup_old_output_files(max_age_hours=24, keep_current_generation_id=generation_id)
 
     settings = get_settings()
     output_dir = Path(settings.LATEX_OUTPUT_DIR)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    tex_filename = f"resume_{session_id}_{uuid.uuid4().hex[:6]}.tex"
+    tex_filename = f"resume_{generation_id}_{uuid.uuid4().hex[:6]}.tex"
     generated_tex_path = output_dir / tex_filename
 
     _assert_safe_latex(latex_source)
@@ -167,11 +167,11 @@ async def compile_pdf(
             generated_tex_path=_safe_tex_path(str(generated_tex_path)),
         )
 
-    pdf_filename = f"resume_{session_id}_{uuid.uuid4().hex[:6]}.pdf"
+    pdf_filename = f"resume_{generation_id}_{uuid.uuid4().hex[:6]}.pdf"
     final_pdf_path = output_dir / pdf_filename
 
     try:
-        with tempfile.TemporaryDirectory(prefix=f"resume_{session_id}_") as tmpdir:
+        with tempfile.TemporaryDirectory(prefix=f"resume_{generation_id}_") as tmpdir:
             tmpdir_path = Path(tmpdir)
             tex_path = tmpdir_path / "main.tex"
             pdf_path = tmpdir_path / "main.pdf"
@@ -179,7 +179,7 @@ async def compile_pdf(
 
             shutil.copy2(generated_tex_path, tex_path)
 
-            logger.info(f"[{session_id}] Using local pdflatex for compilation.")
+            logger.info(f"[{generation_id}] Using local pdflatex for compilation.")
             for pass_num in range(2):
                 process = await asyncio.create_subprocess_exec(
                     "pdflatex",
@@ -213,7 +213,7 @@ async def compile_pdf(
                     warnings = _parse_latex_warnings_from_text(raw_output)
                     logger.error(
                         "[%s] pdflatex failed with code %s. tex=%s line=%s errors=%s output=%s",
-                        session_id,
+                        generation_id,
                         process.returncode,
                         generated_tex_path,
                         line_number,
@@ -241,7 +241,7 @@ async def compile_pdf(
             warnings = _parse_latex_warnings(log_path) if log_path.exists() else []
             shutil.copy2(pdf_path, final_pdf_path)
 
-        logger.info(f"[{session_id}] PDF compilation completed: {final_pdf_path}")
+        logger.info(f"[{generation_id}] PDF compilation completed: {final_pdf_path}")
         return str(final_pdf_path), warnings
 
     except PDFCompileError:
@@ -363,13 +363,13 @@ def _dedupe(values: list[str]) -> list[str]:
     return result
 
 
-def cleanup_old_output_files(max_age_hours: int = 24, keep_current_session_id: str | None = None) -> int:
+def cleanup_old_output_files(max_age_hours: int = 24, keep_current_generation_id: str | None = None) -> int:
     """
     Clean up old LaTeX and PDF files from the output directory.
 
     Args:
         max_age_hours: Maximum age of files to keep (default: 24 hours)
-        keep_current_session_id: Session ID to always keep (prevents deletion before download)
+        keep_current_generation_id: generation ID to always keep (prevents deletion before download)
 
     Returns:
         Number of files deleted
@@ -400,8 +400,8 @@ def cleanup_old_output_files(max_age_hours: int = 24, keep_current_session_id: s
                 continue
 
             is_current_session = False
-            if keep_current_session_id:
-                if keep_current_session_id in file_path.name:
+            if keep_current_generation_id:
+                if keep_current_generation_id in file_path.name:
                     is_current_session = True
 
             if is_current_session:

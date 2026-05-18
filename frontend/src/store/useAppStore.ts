@@ -1,8 +1,8 @@
 /**
  * Global application store using Zustand.
  *
- * Lightweight state for the current active pipeline session.
- * Master profile is NOT stored here — it lives in IndexedDB.
+ * Lightweight state for the current active pipeline generation.
+ * Master profile data is fetched from the backend profile API and cached only for the active run.
  */
 
 import { create } from 'zustand';
@@ -18,48 +18,38 @@ export type AppStep =
   | 'jd-input'
   | 'jd-analysis'
   | 'resume-review'
-  | 'latex-editor'
   | 'cover-letter';
 
 interface AppState {
-  // Current step in the pipeline
   currentStep: AppStep;
   setStep: (step: AppStep) => void;
 
-  // Active session
-  sessionId: string | null;
-  setSessionId: (id: string) => void;
+  generationId: string | null;
+  setGenerationId: (id: string) => void;
 
-  // Parsed JD (set after analysis)
   parsedJD: ParsedJD | null;
   setParsedJD: (jd: ParsedJD) => void;
 
-  // Resume recommendation (set after AI pipeline)
   recommendation: ResumeRecommendation | null;
   setRecommendation: (rec: ResumeRecommendation) => void;
 
-  // ATS score (set after validation)
   atsScore: ATSScore | null;
   setAtsScore: (score: ATSScore | null) => void;
 
   alignmentReport: ATSAlignmentReport | null;
   setAlignmentReport: (report: ATSAlignmentReport | null) => void;
 
-  // LaTeX source (set after rendering)
   latexSource: string | null;
   setLatexSource: (src: string) => void;
 
-  // PDF pipeline metadata
   pipelinePdf: PipelinePdfResult | null;
   setPipelinePdf: (pdf: PipelinePdfResult | null) => void;
 
-  // Cached profile ref (loaded from IndexedDB at session start)
   activeProfile: MasterProfile | null;
   setActiveProfile: (profile: MasterProfile | null) => void;
 
-  // Reset for new session
-  resetSession: () => void;
-  resetJobSession: () => void;
+  resetGeneration: () => void;
+  resetJobGeneration: () => void;
 }
 
 export const useAppStore = create<AppState>()(
@@ -68,8 +58,8 @@ export const useAppStore = create<AppState>()(
       currentStep: 'dashboard',
       setStep: (step) => set({ currentStep: step }),
 
-      sessionId: null,
-      setSessionId: (id) => set({ sessionId: id }),
+      generationId: null,
+      setGenerationId: (id) => set({ generationId: id }),
 
       parsedJD: null,
       setParsedJD: (jd) => set({ parsedJD: jd }),
@@ -92,9 +82,9 @@ export const useAppStore = create<AppState>()(
       activeProfile: null,
       setActiveProfile: (profile) => set({ activeProfile: profile }),
 
-      resetSession: () =>
+      resetGeneration: () =>
         set({
-          sessionId: null,
+          generationId: null,
           parsedJD: null,
           recommendation: null,
           atsScore: null,
@@ -104,9 +94,9 @@ export const useAppStore = create<AppState>()(
           activeProfile: null,
           currentStep: 'dashboard',
         }),
-      resetJobSession: () =>
+      resetJobGeneration: () =>
         set({
-          sessionId: null,
+          generationId: null,
           parsedJD: null,
           recommendation: null,
           atsScore: null,
@@ -117,11 +107,11 @@ export const useAppStore = create<AppState>()(
         }),
     }),
     {
-      name: 'just-resume-session',
+      name: 'just-resume-generation',
       storage: createJSONStorage(() => sessionStorage),
       partialize: (state) => ({
         currentStep: state.currentStep,
-        sessionId: state.sessionId,
+        generationId: state.generationId,
         parsedJD: state.parsedJD,
         recommendation: state.recommendation,
         atsScore: state.atsScore,
@@ -129,6 +119,6 @@ export const useAppStore = create<AppState>()(
         latexSource: state.latexSource,
         pipelinePdf: state.pipelinePdf,
       }),
-    }
-  )
+    },
+  ),
 );

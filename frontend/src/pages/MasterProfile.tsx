@@ -1,12 +1,10 @@
-/**
- * Master Profile page — CRUD interface for the user's single profile.
- * Data persisted to IndexedDB. Never sent to backend except per-request.
- */
-
 import { useEffect, useState, useCallback } from 'react';
-import { getDefaultProfile, saveProfile, createBlankProfile } from '../lib/db';
-import { sanitizeProfile } from '../lib/profile';
+import { getMyProfile, saveMyProfile } from '../lib/profileApi';
+import { createBlankProfile, sanitizeProfile } from '../lib/profile';
 import { useAppStore } from '../store/useAppStore';
+import PageHeader from '../components/ui/PageHeader';
+import PrimaryActionBar from '../components/ui/PrimaryActionBar';
+import LoadingState from '../components/ui/LoadingState';
 import type { MasterProfile, WorkExperience, Education, Skill, Project, Certification, Award } from '../types/profile';
 
 type Tab = 'contact' | 'experience' | 'education' | 'skills' | 'projects' | 'credentials';
@@ -16,29 +14,58 @@ export default function MasterProfilePage() {
   const [activeTab, setActiveTab] = useState<Tab>('contact');
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [completionScore, setCompletionScore] = useState(0);
   const { setActiveProfile } = useAppStore();
 
   useEffect(() => {
-    getDefaultProfile().then((p) => {
-      const prof = p || createBlankProfile();
-      setProfile(prof);
-      setActiveProfile(prof);
-    });
+    let cancelled = false;
+    async function loadProfile() {
+      setLoading(true);
+      setError(null);
+      try {
+        const response = await getMyProfile();
+        const prof = response.profile_json || createBlankProfile();
+        if (cancelled) return;
+        setProfile(prof);
+        setCompletionScore(response.profile_completion_score);
+        setActiveProfile(prof);
+      } catch (loadError) {
+        if (cancelled) return;
+        setProfile(createBlankProfile());
+        setActiveProfile(null);
+        setError(loadError instanceof Error ? loadError.message : 'Unable to load profile.');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    void loadProfile();
+    return () => { cancelled = true; };
   }, [setActiveProfile]);
 
   const handleSave = useCallback(async () => {
     if (!profile) return;
+    if (!profile.contact.full_name.trim() || !profile.contact.email.trim()) {
+      setError('Full name and email are required before saving.');
+      return;
+    }
     const savedProfile: MasterProfile = {
       ...sanitizeProfile(profile),
       updated_at: new Date().toISOString(),
     };
     setSaving(true);
+    setError(null);
     try {
-      await saveProfile(savedProfile);
-      setProfile(savedProfile);
-      setActiveProfile(savedProfile);
+      const response = await saveMyProfile(savedProfile);
+      const persistedProfile = response.profile_json || savedProfile;
+      setProfile(persistedProfile);
+      setCompletionScore(response.profile_completion_score);
+      setActiveProfile(persistedProfile);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : 'Unable to save profile.');
     } finally {
       setSaving(false);
     }
@@ -48,12 +75,8 @@ export default function MasterProfilePage() {
     setProfile((prev) => prev ? { ...prev, ...updates } : prev);
   }, []);
 
-  if (!profile) {
-    return (
-      <div className="loading-state">
-        <div className="spinner spinner-lg" />
-      </div>
-    );
+  if (loading || !profile) {
+    return <LoadingState text="Loading your master profile..." />;
   }
 
   const tabs: { key: Tab; label: string; icon: string }[] = [
@@ -67,18 +90,25 @@ export default function MasterProfilePage() {
 
   return (
     <div className="animate-fade-in">
-      <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-        <div>
-          <h1 className="page-title">Master Profile</h1>
-          <p className="page-subtitle">Your single source of truth. All resume data comes from here.</p>
-        </div>
-        <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
-          {saving ? <span className="spinner" /> : saved ? '✓ Saved' : '💾 Save Profile'}
-        </button>
-      </div>
+      <PageHeader
+        title="Master Profile"
+        subtitle="Your source of truth — all resume data comes from here."
+        badge={<span className="badge badge-info">{completionScore}% complete</span>}
+      />
 
-      {/* Tabs */}
-      <div className="tabs">
+      {error && (
+        <div className="warning-banner warning-error" style={{ marginBottom: 'var(--space-md)' }}>
+          <span>{error}</span>
+        </div>
+      )}
+
+      {(!profile.contact.full_name.trim() || !profile.contact.email.trim()) && (
+        <div className="warning-banner warning-warn" style={{ marginBottom: 'var(--space-md)' }}>
+          <span>Full name and email are required before saving.</span>
+        </div>
+      )}
+
+      <div className="tabs" style={{ marginBottom: 'var(--space-lg)' }}>
         {tabs.map((tab) => (
           <button
             key={tab.key}
@@ -90,7 +120,6 @@ export default function MasterProfilePage() {
         ))}
       </div>
 
-      {/* Tab Content */}
       <div className="animate-fade-in" key={activeTab}>
         {activeTab === 'contact' && <ContactForm profile={profile} onChange={updateProfile} />}
         {activeTab === 'experience' && <ExperienceForm profile={profile} onChange={updateProfile} />}
@@ -99,6 +128,15 @@ export default function MasterProfilePage() {
         {activeTab === 'projects' && <ProjectsForm profile={profile} onChange={updateProfile} />}
         {activeTab === 'credentials' && <CredentialsForm profile={profile} onChange={updateProfile} />}
       </div>
+
+      <PrimaryActionBar>
+        <div style={{ display: 'flex', gap: 'var(--space-sm)', width: '100%', justifyContent: 'flex-end' }}>
+          {saved && <span style={{ color: 'var(--text-success)', fontSize: '0.85rem', alignSelf: 'center' }}>✓ Saved</span>}
+          <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
+            {saving ? <><span className="spinner" /> Saving...</> : 'Save Profile'}
+          </button>
+        </div>
+      </PrimaryActionBar>
     </div>
   );
 }

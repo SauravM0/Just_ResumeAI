@@ -1,49 +1,36 @@
-/**
- * API service layer — typed HTTP client for all backend endpoints.
- */
-
-import type { JDAnalyzeRequest, JDAnalyzeResponse, ParsedJD } from '../types/jd';
+import type { JDAnalyzeRequest, JDAnalyzeResponse } from '../types/jd';
 import type { MasterProfile } from '../types/profile';
 import type {
-  ResumeRecommendation,
   ResumeRecommendRequest,
   ResumeRecommendResponse,
   ResumeRegenerateRequest,
   ResumeValidateRequest,
   ValidateResponse,
-  RenderLatexRequest,
-  RenderLatexResponse,
-  RenderPdfRequest,
-  RenderPdfResponse,
-  ApproveGeneratePdfRequest,
-  ApproveGeneratePdfResponse,
-  CompileLatexSourceRequest,
   PipelineGenerateRequest,
   PipelineGenerateResponse,
+  ExportFileResponse,
+  GenerationFilesResponse,
 } from '../types/resume';
+import { getApiBase } from './env';
+import { useAuthStore } from '../store/useAuthStore';
 
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000/api/v1';
-const CLIENT_USER_ID_KEY = 'just-resume-client-user-id';
+const API_BASE = getApiBase();
 
-function getClientUserId(): string {
-  const existing = localStorage.getItem(CLIENT_USER_ID_KEY);
-  if (existing) return existing;
+export class ApiError extends Error {
+  readonly status: number;
+  readonly isAuthError: boolean;
+  readonly isForbidden: boolean;
+  readonly isNetworkError: boolean;
+  readonly isTimeout: boolean;
 
-  const generated =
-    typeof crypto !== 'undefined' && 'randomUUID' in crypto
-      ? crypto.randomUUID()
-      : `client-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-
-  localStorage.setItem(CLIENT_USER_ID_KEY, generated);
-  return generated;
-}
-
-class ApiError extends Error {
-  status: number;
   constructor(message: string, status: number) {
     super(message);
-    this.status = status;
     this.name = 'ApiError';
+    this.status = status;
+    this.isAuthError = status === 401;
+    this.isForbidden = status === 403;
+    this.isNetworkError = status === 0;
+    this.isTimeout = status === 408;
   }
 }
 
@@ -52,9 +39,7 @@ function formatApiErrorMessage(body: string): string {
     const json = JSON.parse(body);
     const detail = json.detail ?? json.message ?? json;
 
-    if (typeof detail === 'string') {
-      return detail;
-    }
+    if (typeof detail === 'string') return detail;
 
     if (Array.isArray(detail)) {
       return detail
@@ -73,13 +58,26 @@ function formatApiErrorMessage(body: string): string {
   }
 }
 
-async function request<T>(
+function isNetworkError(error: unknown): boolean {
+  return error instanceof TypeError && error.message === 'Failed to fetch';
+}
+
+function filenameFromContentDisposition(header: string | null, fallback: string): string {
+  if (!header) return fallback;
+  const utf8Match = header.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match?.[1]) return decodeURIComponent(utf8Match[1].replace(/"/g, ''));
+  const plainMatch = header.match(/filename="?([^";]+)"?/i);
+  return plainMatch?.[1] ?? fallback;
+}
+
+export async function request<T>(
   endpoint: string,
   options: RequestInit = {},
   timeoutMs = 120000,
 ): Promise<T> {
   const url = `${API_BASE}${endpoint}`;
   const controller = new AbortController();
+  const token = await useAuthStore.getState().getAccessToken();
   const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
   const externalSignal = options.signal;
   if (externalSignal) {
@@ -91,18 +89,34 @@ async function request<T>(
   }
   try {
     const res = await fetch(url, {
+      ...options,
       headers: {
         'Content-Type': 'application/json',
-        'X-Client-User-Id': getClientUserId(),
         ...options.headers,
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
-      ...options,
       signal: controller.signal,
     });
 
     if (!res.ok) {
       const body = await res.text();
       const message = formatApiErrorMessage(body);
+
+      if (res.status === 401) {
+        await useAuthStore.getState().signOut();
+        if (window.location.pathname !== '/login') {
+          window.location.assign('/login');
+        }
+        throw new ApiError(message, 401);
+      }
+
+      if (res.status === 403) {
+        if (window.location.pathname !== '/access-denied') {
+          window.location.assign('/access-denied');
+        }
+        throw new ApiError(message, 403);
+      }
+
       throw new ApiError(message, res.status);
     }
 
@@ -111,19 +125,84 @@ async function request<T>(
     if ((error as Error).name === 'AbortError') {
       throw new ApiError('Request timed out. The backend did not finish in time.', 408);
     }
+    if (isNetworkError(error)) {
+      throw new ApiError(
+        'Backend is not available. Check your internet connection or try again later.',
+        0,
+      );
+    }
     throw error;
   } finally {
     window.clearTimeout(timeoutId);
   }
 }
 
-// ─── Health ─────────────────────────────────────────────────────────────────
+export async function requestBlob(
+  endpoint: string,
+  options: RequestInit = {},
+  timeoutMs = 120000,
+): Promise<{ blob: Blob; filename: string; headers: Headers }> {
+  const url = `${API_BASE}${endpoint}`;
+  const controller = new AbortController();
+  const token = await useAuthStore.getState().getAccessToken();
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(url, {
+      ...options,
+      headers: {
+        ...options.headers,
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      const body = await res.text();
+      const message = formatApiErrorMessage(body);
+
+      if (res.status === 401) {
+        await useAuthStore.getState().signOut();
+        if (window.location.pathname !== '/login') {
+          window.location.assign('/login');
+        }
+        throw new ApiError(message, 401);
+      }
+
+      if (res.status === 403) {
+        if (window.location.pathname !== '/access-denied') {
+          window.location.assign('/access-denied');
+        }
+        throw new ApiError(message, 403);
+      }
+
+      throw new ApiError(message, res.status);
+    }
+
+    return {
+      blob: await res.blob(),
+      filename: filenameFromContentDisposition(res.headers.get('content-disposition'), 'resume'),
+      headers: res.headers,
+    };
+  } catch (error) {
+    if ((error as Error).name === 'AbortError') {
+      throw new ApiError('Request timed out. The backend did not finish in time.', 408);
+    }
+    if (isNetworkError(error)) {
+      throw new ApiError(
+        'Backend is not available. Check your internet connection or try again later.',
+        0,
+      );
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
 
 export async function healthCheck(): Promise<{ status: string }> {
   return request('/health');
 }
-
-// ─── JD Analysis ────────────────────────────────────────────────────────────
 
 export async function analyzeJD(data: JDAnalyzeRequest): Promise<JDAnalyzeResponse> {
   return request('/jd/analyze', {
@@ -139,7 +218,9 @@ export async function generateResumePipeline(data: PipelineGenerateRequest): Pro
   }, 180000);
 }
 
-// ─── Resume ─────────────────────────────────────────────────────────────────
+export async function getGeneration(generationId: string): Promise<any> {
+  return request(`/generations/${generationId}`, { method: 'GET' });
+}
 
 export async function recommendResume(data: ResumeRecommendRequest): Promise<ResumeRecommendResponse> {
   return request('/resume/recommend', {
@@ -162,91 +243,79 @@ export async function validateResume(data: ResumeValidateRequest): Promise<Valid
   });
 }
 
-export async function renderLatex(data: RenderLatexRequest): Promise<RenderLatexResponse> {
-  return request('/resume/render-latex', {
-    method: 'POST',
-    body: JSON.stringify(data),
-  });
-}
-
-export async function renderPdf(data: RenderPdfRequest): Promise<RenderPdfResponse> {
-  return request('/resume/render-pdf', {
-    method: 'POST',
-    body: JSON.stringify({ session_id: data.session_id }),
-  });
-}
-
-async function requestBlob(endpoint: string, options: RequestInit = {}, timeoutMs = 120000): Promise<Blob> {
-  const url = `${API_BASE}${endpoint}`;
-  const controller = new AbortController();
-  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, {
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Client-User-Id': getClientUserId(),
-        ...options.headers,
-      },
-      ...options,
-      signal: controller.signal,
-    });
-    if (!res.ok) {
-      const body = await res.text();
-      throw new ApiError(formatApiErrorMessage(body), res.status);
-    }
-    return res.blob();
-  } finally {
-    window.clearTimeout(timeoutId);
-  }
-}
-
-export async function compileLatexSource(
-  data: CompileLatexSourceRequest,
-): Promise<ApproveGeneratePdfResponse> {
-  return request('/resume/compile-latex-source', {
-    method: 'POST',
-    body: JSON.stringify(data),
-  }, 180000);
-}
-
-export async function approveGeneratePdf(
-  data: ApproveGeneratePdfRequest,
-): Promise<ApproveGeneratePdfResponse> {
-  return request('/resume/approve-generate-pdf', {
-    method: 'POST',
-    body: JSON.stringify(data),
-  }, 180000);
-}
-
-export async function exportResumeDocx(data: ApproveGeneratePdfRequest): Promise<Blob> {
-  return requestBlob('/resume/export-docx', {
-    method: 'POST',
-    body: JSON.stringify(data),
-  }, 180000);
-}
-
-// ─── Cover Letter ───────────────────────────────────────────────────────────
-
-export interface CoverLetterRequest {
-  session_id: string;
+export interface CoverLetterGenerateRequest {
   profile: MasterProfile;
-  parsed_jd: ParsedJD;
-  recommendation: ResumeRecommendation;
   job_title?: string;
   tone?: string;
   additional_context?: string;
 }
 
 export interface CoverLetterResponse {
-  session_id: string;
+  generation_id: string;
   cover_letter_text: string;
   word_count: number;
   warnings: string[];
 }
 
-export async function generateCoverLetter(data: CoverLetterRequest): Promise<CoverLetterResponse> {
-  return request('/cover-letter/generate', {
+export async function generateCoverLetter(
+  generationId: string,
+  data: CoverLetterGenerateRequest,
+): Promise<CoverLetterResponse> {
+  return request(`/cover-letter/${generationId}/generate`, {
     method: 'POST',
     body: JSON.stringify(data),
   });
+}
+
+export async function getCoverLetter(generationId: string): Promise<CoverLetterResponse> {
+  return request(`/cover-letter/${generationId}`, { method: 'GET' });
+}
+
+export async function updateCoverLetter(
+  generationId: string,
+  coverLetterText: string,
+): Promise<CoverLetterResponse> {
+  return request(`/cover-letter/${generationId}`, {
+    method: 'PUT',
+    body: JSON.stringify({ cover_letter_text: coverLetterText }),
+  });
+}
+
+export async function exportPdf(generationId: string): Promise<ExportFileResponse> {
+  const response = await requestBlob(`/resume/${generationId}/export/pdf`, { method: 'POST' }, 180000);
+  return {
+    blob: response.blob,
+    filename: response.filename.endsWith('.pdf') ? response.filename : 'resume.pdf',
+    file_type: 'pdf',
+    compile_warnings: JSON.parse(response.headers.get('x-compile-warnings') || '[]'),
+    regenerated: response.headers.get('x-regenerated') === 'true',
+  };
+}
+
+export async function exportDocx(generationId: string): Promise<ExportFileResponse> {
+  const response = await requestBlob(`/resume/${generationId}/export/docx`, { method: 'POST' }, 180000);
+  return {
+    blob: response.blob,
+    filename: response.filename.endsWith('.docx') ? response.filename : 'resume.docx',
+    file_type: 'docx',
+    regenerated: response.headers.get('x-regenerated') === 'true',
+  };
+}
+
+export async function getGenerationFiles(generationId: string): Promise<GenerationFilesResponse> {
+  return request(`/resume/${generationId}/files`, { method: 'GET' });
+}
+
+export async function regenerateExportFile(
+  generationId: string,
+  fileType: 'pdf' | 'docx',
+): Promise<ExportFileResponse> {
+  const response = await requestBlob(`/resume/${generationId}/files/${fileType}/regenerate`, { method: 'POST' }, 180000);
+  return {
+    blob: response.blob,
+    filename: response.filename.endsWith(`.${fileType}`) ? response.filename : `resume.${fileType}`,
+    file_type: fileType,
+    compile_warnings: fileType === 'pdf' ? JSON.parse(response.headers.get('x-compile-warnings') || '[]') : undefined,
+    regenerated: response.headers.get('x-regenerated') === 'true',
+  };
 }

@@ -74,13 +74,13 @@
     <% if contact_portfolio %> <% if contact_email or contact_phone or contact_location or contact_linkedin or contact_github %>$|$<% endif %> \href{<< contact_portfolio >>}{\underline{Portfolio}}<% endif %>
 \end{center}
 
-<% if summary %>
+<% for section_name in section_order_list %>
+<% if section_name == "summary" and summary %>
 \section{Professional Summary}
 \small{<< summary >>}
 \vspace{-4pt}
-<% endif %>
 
-<% if fresher_order and education %>
+<% elif section_name == "education" and education %>
 \section{Education}
   \resumeSubHeadingListStart
     <% for edu in education %>
@@ -94,9 +94,8 @@
       <% endif %>
     <% endfor %>
   \resumeSubHeadingListEnd
-<% endif %>
 
-<% if skills %>
+<% elif section_name in ("technical skills", "skills") and skills %>
 \section{Technical Skills}
  \begin{itemize}[leftmargin=0.15in, label={}]
     \small{\item{
@@ -105,26 +104,8 @@
      <% endfor %>
     }}
  \end{itemize}
-<% endif %>
 
-<% if fresher_order and projects %>
-\section{Projects}
-    \resumeSubHeadingListStart
-      <% for project in projects %>
-      \resumeProjectHeading
-          {<< project.name >><% if project.technologies %> $|$ \emph{<< project.technologies >>}<% endif %>}{}
-          <% if project.bullets %>
-          \resumeItemListStart
-            <% for bullet in project.bullets %>
-            \resumeItem{<< bullet >>}
-            <% endfor %>
-          \resumeItemListEnd
-          <% endif %>
-      <% endfor %>
-    \resumeSubHeadingListEnd
-<% endif %>
-
-<% if experiences %>
+<% elif section_name == "experience" and experiences %>
 \section{Professional Experience}
   \resumeSubHeadingListStart
     <% for exp in experiences %>
@@ -140,9 +121,8 @@
       <% endif %>
     <% endfor %>
   \resumeSubHeadingListEnd
-<% endif %>
 
-<% if (not fresher_order) and projects %>
+<% elif section_name == "projects" and projects %>
 \section{Projects}
     \resumeSubHeadingListStart
       <% for project in projects %>
@@ -157,25 +137,8 @@
           <% endif %>
       <% endfor %>
     \resumeSubHeadingListEnd
-<% endif %>
 
-<% if (not fresher_order) and education %>
-\section{Education}
-  \resumeSubHeadingListStart
-    <% for edu in education %>
-    \resumeSubheading
-      {<< edu.institution >>}{<< edu.date_range >>}
-      {<< edu.degree_line >>}{<< edu.detail_line >>}
-      <% if edu.coursework %>
-      \resumeItemListStart
-        \resumeItem{Relevant Coursework: << ", ".join(edu.coursework) >>}
-      \resumeItemListEnd
-      <% endif %>
-    <% endfor %>
-  \resumeSubHeadingListEnd
-<% endif %>
-
-<% if achievements %>
+<% elif section_name in ("achievements", "awards") and achievements %>
 \section{Achievements \& Awards}
   \resumeSubHeadingListStart
     <% for item in achievements %>
@@ -189,9 +152,8 @@
       <% endif %>
     <% endfor %>
   \resumeSubHeadingListEnd
-<% endif %>
 
-<% if certifications %>
+<% elif section_name == "certifications" and certifications %>
 \section{Certifications}
   \resumeSubHeadingListStart
     <% for cert in certifications %>
@@ -201,6 +163,7 @@
     <% endfor %>
   \resumeSubHeadingListEnd
 <% endif %>
+<% endfor %>
 
 <% for custom_section in custom_sections %>
 \section{<< custom_section.title >>}

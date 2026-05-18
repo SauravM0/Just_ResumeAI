@@ -1,5 +1,29 @@
 import type { MasterProfile } from '../types/profile';
 
+export function createBlankProfile(): MasterProfile {
+  const now = new Date().toISOString();
+  return {
+    id: crypto.randomUUID(),
+    version: 1,
+    contact: {
+      full_name: '',
+      email: '',
+    },
+    summary: '',
+    work_experience: [],
+    education: [],
+    skills: [],
+    projects: [],
+    certifications: [],
+    publications: [],
+    volunteer: [],
+    awards: [],
+    custom_sections: {},
+    created_at: now,
+    updated_at: now,
+  };
+}
+
 function emptyToUndefined(value?: string): string | undefined {
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;

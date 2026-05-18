@@ -1,173 +1,227 @@
 """
-Resume endpoints — recommend, regenerate, validate, render-latex, render-pdf.
-
-These endpoints manage the full resume generation and rendering pipeline.
+Resume endpoints backed by Supabase generations and Supabase Storage.
 """
+
+from __future__ import annotations
+
+import logging
+import json
+from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
-import logging
-import re
-from pathlib import Path
+from starlette.background import BackgroundTask
 
-from app.config import get_settings
-from app.dependencies.user import get_current_user_id
+from app.ai.gemini_client import GeminiClientError
+from app.ai.orchestrators.resume_orchestrator import generate_recommendation
+from app.ai.resume_fallback import generate_recommendation_without_ai
+from app.dependencies.auth import get_current_user, get_current_user_id
 from app.schemas.resume import (
     ResumeRecommendRequest,
     ResumeRecommendResponse,
+    ResumeRecommendation,
     ResumeRegenerateRequest,
     ResumeValidateRequest,
-    ResumeApproveGeneratePdfRequest,
-    ResumeApproveGeneratePdfResponse,
-    ResumeCompileLatexSourceRequest,
-    ResumeRenderLatexRequest,
-    ResumeRenderLatexResponse,
-    ResumeRenderPdfRequest,
-    ResumeRenderPdfResponse,
 )
 from app.schemas.scoring import ValidateResponse
-from app.ai.resume_fallback import generate_recommendation_without_ai
-from app.ai.orchestrators.resume_orchestrator import generate_recommendation
-from app.ai.gemini_client import GeminiClientError
-from app.services.session_service import get_session, save_session
+from app.schemas.supabase import ResumeGenerationUpdate
 from app.services.ats_alignment_service import build_ats_alignment_report
 from app.services.ats_keyword_planner import build_ats_keyword_plan
-from app.services.scoring_service import compute_ats_score
-from app.services.latex_render_service import render_latex
-from app.services.pdf_compile_service import compile_pdf, PDFCompileError
-from app.services.resume_budget_service import fit_resume_to_page_budget
 from app.services.docx_export_service import export_resume_docx
+from app.services.generation_service import assert_generation_owner, get_generation, update_generation
+from app.services.latex_render_service import render_latex
+from app.services.pdf_compile_service import PDFCompileError, compile_pdf
+from app.services.resume_budget_service import fit_resume_to_page_budget
+from app.services.scoring_service import compute_ats_score
+from app.services.storage_service import summarize_generation_files
+from app.services.supabase_service import get_supabase_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/resume", tags=["resume"])
 
-_SAFE_PDF_FILENAME_RE = re.compile(r"^resume_[a-f0-9]{32}_[a-f0-9]{6}\.pdf$")
-_SAFE_DOCX_FILENAME_RE = re.compile(r"^resume_[a-f0-9]{32}_[a-f0-9]{6}\.docx$")
+
+def _require_generation(user_id: str, generation_id: str):
+    generation = get_generation(user_id, generation_id)
+    if generation is None:
+        raise HTTPException(status_code=404, detail="Generation not found")
+    if not generation.parsed_jd_json:
+        raise HTTPException(status_code=400, detail="Parsed job description not found")
+    return generation, generation.parsed_jd_json
 
 
-class LaTeXRenderError(Exception):
-    """Compatibility error type for renderers that return structured LaTeX errors."""
+def _locked_bullets(recommendation: ResumeRecommendation | None, locked_ids: list[str]) -> dict[str, str]:
+    if not recommendation:
+        return {}
 
-    def __init__(self, errors: list[str]):
-        super().__init__("LaTeX rendering failed")
-        self.errors = errors
-
-
-def _require_session_parsed_jd(session_id: str, user_id: str):
-    """Load the authoritative parsed JD from session or raise a 4xx error."""
-    session = get_session(session_id, user_id=user_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found or expired")
-    if not session.parsed_jd:
-        raise HTTPException(status_code=400, detail="Parsed JD not found in session")
-    return session, session.parsed_jd
+    locked = {}
+    for entry in [*recommendation.experience, *recommendation.projects]:
+        for bullet in entry.bullets:
+            if bullet.id in locked_ids:
+                locked[bullet.id] = bullet.text
+    return locked
 
 
-def _safe_tex_reference(path: str | None) -> str | None:
-    if not path:
-        return None
-    settings = get_settings()
-    if settings.DEBUG:
-        return path
-    return Path(path).name
-
-
-def _compile_failure_response(
-    exc: PDFCompileError,
-    latex_source: str = "",
-) -> dict:
-    logger.error(
-        "PDF compilation failed. tex=%s line=%s errors=%s warnings=%s excerpt=%s raw=%s",
-        exc.generated_tex_path,
-        exc.line_number,
-        exc.errors,
-        exc.warnings,
-        exc.pdflatex_excerpt,
-        (exc.raw_output or "")[-4000:],
-    )
-    return {
-        "latex_source": latex_source,
-        "pdf_url": "",
-        "compile_success": False,
-        "compile_errors": exc.response_errors(),
-        "compile_warnings": exc.warnings,
-        "generated_tex_path": _safe_tex_reference(exc.generated_tex_path),
-        "pdflatex_excerpt": exc.pdflatex_excerpt,
-        "line_number": exc.line_number,
-    }
-
-
-def _fit_recommendation_for_pdf(session, recommendation):
-    if not session.parsed_jd:
-        return recommendation
+def _fit_for_export(parsed_jd, recommendation: ResumeRecommendation) -> ResumeRecommendation:
     return fit_resume_to_page_budget(
         recommendation=recommendation,
-        parsed_jd=session.parsed_jd,
+        parsed_jd=parsed_jd,
         target_pages=1,
     )
 
 
-@router.post("/recommend", response_model=ResumeRecommendResponse)
-async def recommend_resume(
-    request: ResumeRecommendRequest,
-    user_id: str = Depends(get_current_user_id),
-):
-    """
-    Generate a resume recommendation from profile + parsed JD.
+def _remove_local_file(path: str | None) -> None:
+    if not path:
+        return
+    try:
+        Path(path).unlink(missing_ok=True)
+    except OSError:
+        logger.warning("Could not remove local generated file after failed upload: %s", path)
 
-    This runs the multi-step AI pipeline:
-    1. Relevance matching
-    2. Resume composition
-    3. Deterministic rule enforcement
 
-    Returns a recommendation for human review.
-    """
-    session, parsed_jd = _require_session_parsed_jd(request.session_id, user_id)
+def _download_response(
+    path: str,
+    *,
+    generation_id: str,
+    file_type: Literal["pdf", "docx"],
+) -> FileResponse:
+    media_types = {
+        "pdf": "application/pdf",
+        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    }
+    filename = f"resume-{generation_id}.{file_type}"
+    return FileResponse(
+        path=path,
+        media_type=media_types[file_type],
+        filename=filename,
+        background=BackgroundTask(_remove_local_file, path),
+    )
+
+
+def _require_saved_export_data(gen) -> ResumeRecommendation:
+    if not gen.resume_json or not gen.parsed_jd_json:
+        raise HTTPException(status_code=400, detail="No saved resume data found for this generation")
+    from app.schemas.jd import ParsedJD
+    parsed_jd = ParsedJD.model_validate(gen.parsed_jd_json)
+    return _fit_for_export(parsed_jd, ResumeRecommendation(**gen.resume_json))
+
+
+async def _export_saved_pdf(
+    user_id: str,
+    generation_id: str,
+    gen,
+    *,
+    regenerated: bool = False,
+) -> FileResponse:
+    recommendation = _require_saved_export_data(gen)
+    latex_source = render_latex(recommendation)
+    try:
+        pdf_path, compile_warnings = await compile_pdf(
+            latex_source=latex_source,
+            generation_id=generation_id,
+        )
+    except PDFCompileError as exc:
+        raise HTTPException(status_code=422, detail=exc.response_errors()) from exc
+
+    _log_export(user_id, generation_id, "pdf_export", {"compile_success": True, "regenerated": regenerated})
+    response = _download_response(pdf_path, generation_id=generation_id, file_type="pdf")
+    if compile_warnings:
+        response.headers["X-Compile-Warnings"] = json.dumps(compile_warnings)
+    response.headers["X-Regenerated"] = "true" if regenerated else "false"
+    return response
+
+
+def _export_saved_docx(
+    user_id: str,
+    generation_id: str,
+    gen,
+    *,
+    regenerated: bool = False,
+) -> FileResponse:
+    recommendation = _require_saved_export_data(gen)
+    docx_path = export_resume_docx(recommendation, generation_id)
+
+    _log_export(user_id, generation_id, "docx_export", {"regenerated": regenerated})
+    response = _download_response(docx_path, generation_id=generation_id, file_type="docx")
+    response.headers["X-Regenerated"] = "true" if regenerated else "false"
+    return response
+
+
+async def _build_recommendation(
+    *,
+    request: ResumeRecommendRequest | ResumeRegenerateRequest,
+    parsed_jd,
+    current_draft: ResumeRecommendation | None = None,
+) -> ResumeRecommendResponse:
     clean_profile = request.profile
     ats_plan = build_ats_keyword_plan(
         parsed_jd=parsed_jd,
         profile=clean_profile,
         emphasis=request.emphasis,
         target_pages=1,
+        current_draft=current_draft,
     )
+    locked_bullets = _locked_bullets(
+        current_draft,
+        getattr(request, "locked_bullet_ids", []),
+    )
+
+    fallback_used = False
     try:
         recommendation = await generate_recommendation(
             profile=clean_profile,
             parsed_jd=parsed_jd,
-            session_id=request.session_id,
+            generation_id=request.generation_id,
             emphasis=request.emphasis,
             rejected_ids=request.rejected_item_ids,
+            locked_bullets=locked_bullets,
             additional_alignment_text=request.additional_alignment_text,
             ats_plan=ats_plan,
         )
-        alignment_report = build_ats_alignment_report(parsed_jd, recommendation, ats_plan=ats_plan)
-
-        # Store in session
-        session.recommendation = recommendation
-        session.rejected_ids = list(request.rejected_item_ids)
-        save_session(session)
-
-        return ResumeRecommendResponse(recommendation=recommendation, alignment_report=alignment_report)
-
-    except GeminiClientError as e:
-        logger.warning(f"Resume recommendation AI path failed, using fallback: {e}")
+    except GeminiClientError as exc:
+        logger.warning("Resume generation AI unavailable, using fallback: %s", exc)
+        fallback_used = True
         recommendation = generate_recommendation_without_ai(
             profile=clean_profile,
             parsed_jd=parsed_jd,
-            session_id=request.session_id,
+            generation_id=request.generation_id,
             emphasis=request.emphasis,
             rejected_ids=request.rejected_item_ids,
+            locked_bullets=locked_bullets,
             additional_alignment_text=request.additional_alignment_text,
             ats_plan=ats_plan,
         )
-        alignment_report = build_ats_alignment_report(parsed_jd, recommendation, ats_plan=ats_plan)
-        session.recommendation = recommendation
-        session.rejected_ids = list(request.rejected_item_ids)
-        save_session(session)
-        return ResumeRecommendResponse(recommendation=recommendation, alignment_report=alignment_report)
-    except Exception as e:
-        logger.error(f"Unexpected error in recommendation: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error")
+
+    if fallback_used:
+        recommendation.warnings.append(
+            "AI resume generation was temporarily unavailable. "
+            "A rule-based fallback was used instead. Review the output carefully "
+            "and consider regenerating if the AI service is available."
+        )
+
+    alignment_report = build_ats_alignment_report(parsed_jd, recommendation, ats_plan=ats_plan)
+    return ResumeRecommendResponse(recommendation=recommendation, alignment_report=alignment_report)
+
+
+@router.post("/recommend", response_model=ResumeRecommendResponse)
+async def recommend_resume(
+    request: ResumeRecommendRequest,
+    current_user=Depends(get_current_user),
+):
+    """Generate a resume recommendation for an existing Supabase generation."""
+    generation, parsed_jd = _require_generation(current_user.user_id, request.generation_id)
+
+    result = await _build_recommendation(request=request, parsed_jd=parsed_jd)
+    update_generation(
+        user_id=current_user.user_id,
+        generation_id=request.generation_id,
+        update_data=ResumeGenerationUpdate(
+            resume_json=result.recommendation.model_dump(),
+            alignment_report_json=result.alignment_report.model_dump() if result.alignment_report else None,
+            status="draft",
+        ),
+    )
+    return result
 
 
 @router.post("/regenerate", response_model=ResumeRecommendResponse)
@@ -175,69 +229,25 @@ async def regenerate_resume(
     request: ResumeRegenerateRequest,
     user_id: str = Depends(get_current_user_id),
 ):
-    """
-    Regenerate resume with updated preferences (emphasis, locked bullets, rejected items).
-    Same pipeline as recommend, but with user constraints applied.
-    """
-    session, parsed_jd = _require_session_parsed_jd(request.session_id, user_id)
-    clean_profile = request.profile
-    ats_plan = build_ats_keyword_plan(
+    """Regenerate a saved resume using the Supabase generation as source of truth."""
+    generation, parsed_jd = _require_generation(user_id, request.generation_id)
+    current_draft = ResumeRecommendation(**generation.resume_json) if generation.resume_json else None
+
+    result = await _build_recommendation(
+        request=request,
         parsed_jd=parsed_jd,
-        profile=clean_profile,
-        emphasis=request.emphasis,
-        target_pages=1,
-        current_draft=session.recommendation,
+        current_draft=current_draft,
     )
-    try:
-        # Build locked bullets map from IDs
-        locked_bullets = {}
-        if session.recommendation:
-            for exp in session.recommendation.experience:
-                for b in exp.bullets:
-                    if b.id in request.locked_bullet_ids:
-                        locked_bullets[b.id] = b.text
-            for proj in session.recommendation.projects:
-                for b in proj.bullets:
-                    if b.id in request.locked_bullet_ids:
-                        locked_bullets[b.id] = b.text
-
-        recommendation = await generate_recommendation(
-            profile=clean_profile,
-            parsed_jd=parsed_jd,
-            session_id=request.session_id,
-            emphasis=request.emphasis,
-            rejected_ids=request.rejected_item_ids,
-            locked_bullets=locked_bullets,
-            additional_alignment_text=request.additional_alignment_text,
-            ats_plan=ats_plan,
-        )
-        alignment_report = build_ats_alignment_report(parsed_jd, recommendation, ats_plan=ats_plan)
-
-        session.recommendation = recommendation
-        session.rejected_ids = list(request.rejected_item_ids)
-        save_session(session)
-        return ResumeRecommendResponse(recommendation=recommendation, alignment_report=alignment_report)
-
-    except GeminiClientError as e:
-        logger.warning(f"Resume regeneration AI path failed, using fallback: {e}")
-        recommendation = generate_recommendation_without_ai(
-            profile=clean_profile,
-            parsed_jd=parsed_jd,
-            session_id=request.session_id,
-            emphasis=request.emphasis,
-            rejected_ids=request.rejected_item_ids,
-            locked_bullets=locked_bullets,
-            additional_alignment_text=request.additional_alignment_text,
-            ats_plan=ats_plan,
-        )
-        alignment_report = build_ats_alignment_report(parsed_jd, recommendation, ats_plan=ats_plan)
-        session.recommendation = recommendation
-        session.rejected_ids = list(request.rejected_item_ids)
-        save_session(session)
-        return ResumeRecommendResponse(recommendation=recommendation, alignment_report=alignment_report)
-    except Exception as e:
-        logger.error(f"Unexpected error in regeneration: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error")
+    update_generation(
+        user_id=user_id,
+        generation_id=request.generation_id,
+        update_data=ResumeGenerationUpdate(
+            resume_json=result.recommendation.model_dump(),
+            alignment_report_json=result.alignment_report.model_dump() if result.alignment_report else None,
+            status="draft",
+        ),
+    )
+    return result
 
 
 @router.post("/validate", response_model=ValidateResponse)
@@ -245,247 +255,89 @@ async def validate_resume(
     request: ResumeValidateRequest,
     user_id: str = Depends(get_current_user_id),
 ):
-    """
-    Run ATS validation scoring on the reviewed resume.
-    Returns keyword coverage, readability score, and actionable recommendations.
-    """
-    _, parsed_jd = _require_session_parsed_jd(request.session_id, user_id)
-
+    """Run ATS validation scoring against the generation's parsed JD."""
+    _, parsed_jd = _require_generation(user_id, request.generation_id)
     ats_score = compute_ats_score(request.recommendation, parsed_jd)
 
-    return ValidateResponse(
-        session_id=request.session_id,
-        ats_score=ats_score,
+    update_generation(
+        user_id=user_id,
+        generation_id=request.generation_id,
+        update_data=ResumeGenerationUpdate(ats_score_json=ats_score.model_dump()),
     )
+    return ValidateResponse(generation_id=request.generation_id, ats_score=ats_score)
 
 
-@router.post("/approve-generate-pdf", response_model=ResumeApproveGeneratePdfResponse)
-async def approve_generate_pdf(
-    request: ResumeApproveGeneratePdfRequest,
-    user_id: str = Depends(get_current_user_id),
+@router.post("/{generation_id}/export/pdf")
+async def export_resume_pdf(
+    generation_id: str,
+    current_user=Depends(get_current_user),
 ):
-    """
-    Approve the reviewed recommendation, render LaTeX, compile PDF, and persist outputs.
-    This is the primary MVP action behind "Approve & Generate PDF".
-    """
-    session = get_session(request.session_id, user_id=user_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found or expired")
-
+    """Export the saved resume as a PDF download without storing the file."""
     try:
-        recommendation = _fit_recommendation_for_pdf(session, request.recommendation)
-        latex_source = render_latex(recommendation)
-        session.recommendation = recommendation
-        session.latex_source = latex_source
-        save_session(session)
+        gen = assert_generation_owner(current_user.user_id, generation_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Generation not found")
 
-        pdf_path, warnings = await compile_pdf(
-            latex_source=latex_source,
-            session_id=request.session_id,
-        )
-        pdf_filename = pdf_path.split("/")[-1].split("\\")[-1]
-        session.pdf_filename = pdf_filename
-        save_session(session)
-
-        return ResumeApproveGeneratePdfResponse(
-            latex_source=latex_source,
-            pdf_url=f"/api/v1/resume/download/{pdf_filename}",
-            compile_success=True,
-            compile_errors=[],
-            compile_warnings=warnings,
-        )
-
-    except LaTeXRenderError as e:
-        return ResumeApproveGeneratePdfResponse(
-            latex_source="",
-            pdf_url="",
-            compile_success=False,
-            compile_errors=e.errors,
-            compile_warnings=[],
-        )
-    except PDFCompileError as e:
-        return ResumeApproveGeneratePdfResponse(**_compile_failure_response(e, session.latex_source or ""))
-    except Exception as e:
-        logger.error("Approve and generate PDF failed: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail="PDF generation failed. Please retry.")
+    return await _export_saved_pdf(str(current_user.user_id), generation_id, gen)
 
 
-@router.post("/export-docx")
-async def export_docx(
-    request: ResumeApproveGeneratePdfRequest,
-    user_id: str = Depends(get_current_user_id),
+@router.post("/{generation_id}/export/docx")
+async def export_resume_docx_endpoint(
+    generation_id: str,
+    current_user=Depends(get_current_user),
 ):
-    """Export the reviewed recommendation as a simple ATS-friendly DOCX."""
-    session = get_session(request.session_id, user_id=user_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found or expired")
-
+    """Export the saved resume as a DOCX download without storing the file."""
     try:
-        recommendation = _fit_recommendation_for_pdf(session, request.recommendation)
-        docx_path = export_resume_docx(recommendation, request.session_id)
-        session.recommendation = recommendation
-        save_session(session)
-        return FileResponse(
-            path=docx_path,
-            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            filename=Path(docx_path).name,
-        )
-    except Exception as e:
-        logger.error("DOCX export failed: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail="DOCX export failed. Please retry.")
+        gen = assert_generation_owner(current_user.user_id, generation_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Generation not found")
+
+    return _export_saved_docx(str(current_user.user_id), generation_id, gen)
 
 
-@router.post("/render-latex", response_model=ResumeRenderLatexResponse)
-async def render_resume_latex(
-    request: ResumeRenderLatexRequest,
-    user_id: str = Depends(get_current_user_id),
+@router.post("/{generation_id}/files/{file_type}/regenerate")
+async def regenerate_generation_file(
+    generation_id: str,
+    file_type: Literal["pdf", "docx"],
+    current_user=Depends(get_current_user),
 ):
-    """
-    Render the reviewed resume recommendation into LaTeX source code.
-    """
-    session = get_session(request.session_id, user_id=user_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found or expired")
-
+    """Generate a fresh export from saved resume_json and return it as a download."""
     try:
-        recommendation = _fit_recommendation_for_pdf(session, request.recommendation)
-        latex_source = render_latex(recommendation)
-        session.recommendation = recommendation
-        session.latex_source = latex_source
-        save_session(session)
+        gen = assert_generation_owner(current_user.user_id, generation_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Generation not found")
 
-        return ResumeRenderLatexResponse(
-            latex_source=latex_source,
-            warnings=[],
-        )
-    except Exception as e:
-        logger.error(f"LaTeX rendering failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"LaTeX rendering failed: {str(e)}")
+    if file_type == "pdf":
+        return await _export_saved_pdf(str(current_user.user_id), generation_id, gen, regenerated=True)
+    return _export_saved_docx(str(current_user.user_id), generation_id, gen, regenerated=True)
 
 
-@router.post("/render-pdf", response_model=ResumeRenderPdfResponse)
-async def render_resume_pdf(
-    request: ResumeRenderPdfRequest,
-    user_id: str = Depends(get_current_user_id),
+@router.get("/{generation_id}/files")
+async def list_generation_files(
+    generation_id: str,
+    current_user=Depends(get_current_user),
 ):
-    """
-    Compile LaTeX source into a downloadable PDF.
-    """
-    session = get_session(request.session_id, user_id=user_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found or expired")
-    if not session.latex_source:
-        raise HTTPException(
-            status_code=400,
-            detail="No rendered LaTeX found in session. Call /render-latex first.",
-        )
-
+    """Return empty file metadata; exports are direct downloads and are not stored."""
     try:
-        pdf_path, warnings = await compile_pdf(
-            latex_source=session.latex_source,
-            session_id=request.session_id,
-        )
+        assert_generation_owner(current_user.user_id, generation_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Generation not found")
 
-        # Generate download URL (served as static file)
-        pdf_filename = pdf_path.split("/")[-1].split("\\")[-1]
-        pdf_url = f"/api/v1/resume/download/{pdf_filename}"
-
-        return ResumeRenderPdfResponse(
-            pdf_url=pdf_url,
-            compile_success=True,
-            compile_errors=[],
-            compile_warnings=warnings,
-        )
-
-    except PDFCompileError as e:
-        payload = _compile_failure_response(e, "")
-        payload.pop("latex_source", None)
-        return ResumeRenderPdfResponse(**payload)
-    except Exception as e:
-        logger.error(f"PDF compilation failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"PDF compilation failed: {str(e)}")
+    files = []
+    return {
+        "generation_id": generation_id,
+        **summarize_generation_files(files),
+        "files": files,
+    }
 
 
-@router.post("/compile-latex-source", response_model=ResumeApproveGeneratePdfResponse)
-async def compile_latex_source(
-    request: ResumeCompileLatexSourceRequest,
-    user_id: str = Depends(get_current_user_id),
-):
-    """
-    Compile user-edited LaTeX source from the advanced editor and persist it.
-    """
-    session = get_session(request.session_id, user_id=user_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found or expired")
-
-    latex_source = request.latex_source
-    session.latex_source = latex_source
-    save_session(session)
-
+def _log_export(user_id: str, generation_id: str, event_type: str, metadata: dict) -> None:
     try:
-        pdf_path, warnings = await compile_pdf(
-            latex_source=latex_source,
-            session_id=request.session_id,
+        get_supabase_service().log_usage_event(
+            user_id=str(user_id),
+            event_type=event_type,
+            generation_id=generation_id,
+            metadata=metadata,
         )
-        pdf_filename = pdf_path.split("/")[-1].split("\\")[-1]
-        session.pdf_filename = pdf_filename
-        save_session(session)
-
-        return ResumeApproveGeneratePdfResponse(
-            latex_source=latex_source,
-            pdf_url=f"/api/v1/resume/download/{pdf_filename}",
-            compile_success=True,
-            compile_errors=[],
-            compile_warnings=warnings,
-        )
-    except PDFCompileError as e:
-        return ResumeApproveGeneratePdfResponse(**_compile_failure_response(e, latex_source))
-    except Exception as e:
-        logger.error("Advanced LaTeX compilation failed: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"PDF compilation failed: {str(e)}")
-
-
-@router.get("/download/{filename}")
-async def download_pdf(filename: str):
-    """Serve a compiled PDF for download."""
-    if not _SAFE_PDF_FILENAME_RE.match(filename):
-        raise HTTPException(status_code=404, detail="PDF not found")
-
-    settings = get_settings()
-    output_dir = Path(settings.LATEX_OUTPUT_DIR).resolve()
-    pdf_path = (output_dir / filename).resolve()
-
-    if output_dir not in pdf_path.parents:
-        raise HTTPException(status_code=404, detail="PDF not found")
-
-    if not pdf_path.exists() or pdf_path.suffix.lower() != ".pdf":
-        raise HTTPException(status_code=404, detail="PDF not found")
-
-    return FileResponse(
-        path=str(pdf_path),
-        media_type="application/pdf",
-        filename=filename,
-    )
-
-
-@router.get("/download-docx/{filename}")
-async def download_docx(filename: str):
-    """Serve a generated DOCX for download."""
-    if not _SAFE_DOCX_FILENAME_RE.match(filename):
-        raise HTTPException(status_code=404, detail="DOCX not found")
-
-    settings = get_settings()
-    output_dir = Path(settings.LATEX_OUTPUT_DIR).resolve()
-    docx_path = (output_dir / filename).resolve()
-
-    if output_dir not in docx_path.parents:
-        raise HTTPException(status_code=404, detail="DOCX not found")
-
-    if not docx_path.exists() or docx_path.suffix.lower() != ".docx":
-        raise HTTPException(status_code=404, detail="DOCX not found")
-
-    return FileResponse(
-        path=str(docx_path),
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        filename=filename,
-    )
+    except Exception:
+        logger.warning("Failed to log %s usage event", event_type)

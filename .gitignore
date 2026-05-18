@@ -3,13 +3,23 @@
 Thumbs.db
 .idea/
 .vscode/
+.vercel/
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
 
+# Local exports and archives
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+*.rar
+
 # Logs
+logs/
 *.log
 npm-debug.log*
 yarn-debug.log*
@@ -21,10 +31,18 @@ lerna-debug.log*
 .env
 .env.*
 !.env.example
+backend/.env
+backend/.env.*
+!backend/.env.example
+frontend/.env
+frontend/.env.*
+!frontend/.env.example
 
 # Python
 __pycache__/
+**/__pycache__/
 *.py[cod]
+*.pyc
 *.pyo
 *.pyd
 .pytest_cache/
@@ -32,15 +50,19 @@ __pycache__/
 .ruff_cache/
 .coverage
 .coverage.*
+coverage/
 .python-version
 .venv/
 venv/
+*.sqlite3
 
 # Backend local config and generated files
-backend/.env
-backend/.env.*
-!backend/.env.example
 backend/output/
+backend/output/**
+backend/output/*.pdf
+backend/output/*.docx
+backend/output/*.tex
+backend/output/sessions.sqlite3
 backend/*.sqlite3
 backend/**/__pycache__/
 backend/**/*.pyc
@@ -48,6 +70,8 @@ backend/.pytest_cache/
 .pytest_cache/
 
 # Frontend dependencies and build output
+node_modules/
+dist/
 frontend/node_modules/
 frontend/dist/
 frontend/dist-ssr/

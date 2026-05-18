@@ -1,14 +1,22 @@
 """
-Cover letter generation endpoint.
+Cover letter generation endpoint using generation_id.
+Cover letters are saved to resume_generations.cover_letter_text.
 """
 
 from fastapi import APIRouter, Depends, HTTPException
 import logging
 
-from app.dependencies.user import get_current_user_id
-from app.schemas.cover_letter import CoverLetterRequest, CoverLetterResponse
+from app.dependencies.auth import get_current_user
+from app.schemas.cover_letter import CoverLetterGenerateRequest, CoverLetterResponse, CoverLetterUpdateRequest
+from app.schemas.supabase import ResumeGenerationUpdate
 from app.ai.gemini_client import get_gemini_client, GeminiClientError
-from app.services.session_service import get_session
+from app.services.generation_service import (
+    get_generation,
+    assert_generation_owner,
+    update_generation,
+    GenerationNotFoundError,
+)
+from app.services.supabase_service import get_supabase_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/cover-letter", tags=["cover-letter"])
@@ -26,50 +34,62 @@ RULES:
 8. Return ONLY the response as JSON with fields: cover_letter_text, word_count."""
 
 
-class _CoverLetterOutput(CoverLetterResponse):
-    """Internal model for Gemini output parsing (includes inherited fields)."""
-    pass
-
-
-@router.post("/generate", response_model=CoverLetterResponse)
+@router.post("/{generation_id}/generate", response_model=CoverLetterResponse)
 async def generate_cover_letter(
-    request: CoverLetterRequest,
-    user_id: str = Depends(get_current_user_id),
+    generation_id: str,
+    request: CoverLetterGenerateRequest,
+    current_user = Depends(get_current_user),
 ):
     """
-    Generate a tailored cover letter based on the resume recommendation and JD.
-    Uses JD optimization to align cover letter with job requirements.
+    Generate a tailored cover letter based on the generation's resume and JD.
+    Saves the result to resume_generations.cover_letter_text.
     """
-    session = get_session(request.session_id, user_id=user_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found or expired")
+    try:
+        gen = assert_generation_owner(current_user.user_id, generation_id)
+    except GenerationNotFoundError:
+        raise HTTPException(status_code=404, detail="Generation not found")
+
+    if not gen.resume_json:
+        raise HTTPException(status_code=400, detail="No resume found for this generation")
+
+    profile = request.profile
+    parsed_jd = gen.parsed_jd_json
+    resume_json = gen.resume_json
+
+    if not parsed_jd:
+        raise HTTPException(status_code=400, detail="No job description found for this generation")
 
     try:
         client = get_gemini_client()
 
-        company_name = request.parsed_jd.company or "the company"
-        job_title = request.job_title or request.parsed_jd.job_title or "the role"
+        company_name = parsed_jd.get("company") or "the company"
+        job_title = request.job_title or parsed_jd.get("job_title") or "the role"
 
+        experience = resume_json.get("experience", [])
         exp_summary = "; ".join(
-            f"{e.title} at {e.company}" for e in request.recommendation.experience[:3]
+            f"{e.get('title', 'Role')} at {e.get('company', 'Company')}" 
+            for e in experience[:3] if e.get("included", True)
         )
         
-        resume_summary = request.recommendation.summary or ""
+        resume_summary = resume_json.get("summary") or ""
         
+        skills_groups = resume_json.get("skills", [])
         skills = ", ".join(
-            s for sg in request.recommendation.skills for s in sg.skills[:8]
+            s for sg in skills_groups for s in sg.get("skills", [])[:8]
         )
-
-        jd_keywords = ", ".join(request.parsed_jd.keywords[:10]) if request.parsed_jd.keywords else ""
         
-        responsibilities = "; ".join(request.parsed_jd.responsibilities[:5]) if request.parsed_jd.responsibilities else ""
+        kw_list = parsed_jd.get("keywords", []) or []
+        jd_keywords = ", ".join(k["keyword"] if isinstance(k, dict) else k for k in kw_list[:10])
+        
+        responsibilities = "; ".join(parsed_jd.get("responsibilities", [])[:5]) if parsed_jd.get("responsibilities") else ""
 
+        candidate_name = profile.contact.full_name or "Candidate"
         prompt = f"""Write a compelling cover letter for this job application.
 
 TARGET ROLE: {job_title}
 COMPANY: {company_name}
-CANDIDATE: {request.profile.contact.full_name}
-RESUME HEADLINE: {request.recommendation.target_title}
+CANDIDATE: {candidate_name}
+RESUME HEADLINE: {resume_json.get('target_title', '')}
 RESUME SUMMARY: {resume_summary}
 KEY EXPERIENCE: {exp_summary}
 KEY SKILLS (from resume): {skills}
@@ -98,15 +118,91 @@ Write a compelling, personalized cover letter that:
             system_instruction=COVER_LETTER_SYSTEM_PROMPT,
         )
 
+        cover_letter_text = result.cover_letter_text
+        word_count = result.word_count or len(cover_letter_text.split())
+
+        update_generation(
+            current_user.user_id,
+            generation_id,
+            ResumeGenerationUpdate(cover_letter_text=cover_letter_text),
+        )
+
+        svc = get_supabase_service()
+        svc.log_usage_event(
+            current_user.user_id,
+            "cover_letter_generate",
+            metadata={
+                "job_title": job_title,
+                "company": company_name,
+                "word_count": word_count,
+            },
+            generation_id=generation_id,
+        )
+
         return CoverLetterResponse(
-            session_id=request.session_id,
-            cover_letter_text=result.cover_letter_text,
-            word_count=result.word_count or len(result.cover_letter_text.split()),
+            generation_id=generation_id,
+            cover_letter_text=cover_letter_text,
+            word_count=word_count,
+            warnings=[],
         )
 
     except GeminiClientError as e:
         logger.error(f"Cover letter generation failed: {e}")
         raise HTTPException(status_code=502, detail=f"AI generation failed: {str(e)}")
+    except GenerationNotFoundError:
+        raise HTTPException(status_code=404, detail="Generation not found")
     except Exception as e:
         logger.error(f"Unexpected error in cover letter: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/{generation_id}", response_model=CoverLetterResponse)
+async def get_cover_letter(
+    generation_id: str,
+    current_user = Depends(get_current_user),
+):
+    """Get the cover letter for a generation."""
+    try:
+        gen = assert_generation_owner(current_user.user_id, generation_id)
+    except GenerationNotFoundError:
+        raise HTTPException(status_code=404, detail="Generation not found")
+
+    if not gen.cover_letter_text:
+        raise HTTPException(status_code=404, detail="No cover letter found for this generation")
+
+    word_count = len(gen.cover_letter_text.split())
+
+    return CoverLetterResponse(
+        generation_id=generation_id,
+        cover_letter_text=gen.cover_letter_text,
+        word_count=word_count,
+        warnings=[],
+    )
+
+
+@router.put("/{generation_id}", response_model=CoverLetterResponse)
+async def update_cover_letter(
+    generation_id: str,
+    request: CoverLetterUpdateRequest,
+    current_user = Depends(get_current_user),
+):
+    """Update (save) the cover letter text for a generation."""
+    try:
+        gen = assert_generation_owner(current_user.user_id, generation_id)
+    except GenerationNotFoundError:
+        raise HTTPException(status_code=404, detail="Generation not found")
+
+    updated = update_generation(
+        current_user.user_id,
+        generation_id,
+        ResumeGenerationUpdate(cover_letter_text=request.cover_letter_text),
+    )
+
+    word_count = len(updated.cover_letter_text.split()) if updated.cover_letter_text else 0
+
+    return CoverLetterResponse(
+        generation_id=generation_id,
+        cover_letter_text=updated.cover_letter_text,
+        word_count=word_count,
+        warnings=[],
+    )

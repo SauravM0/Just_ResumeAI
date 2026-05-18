@@ -104,6 +104,6 @@ class JDAnalyzeRequest(BaseModel):
 
 class JDAnalyzeResponse(BaseModel):
     """Response from JD analysis endpoint."""
-    session_id: str = Field(..., description="Unique session for this JD analysis flow")
+    generation_id: str = Field(..., description="Persistent Supabase generation ID")
     parsed_jd: ParsedJD
     warnings: list[str] = Field(default_factory=list)

@@ -1,0 +1,37 @@
+.env
+.env.*
+!.env.example
+
+output/
+output/**
+*.sqlite3
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+coverage
+logs/
+
+.git
+.gitignore
+Dockerfile
+README.md
+DEPLOYMENT.md
+
+# LaTeX build artifacts
+*.aux
+*.log
+*.out
+*.gz
+*.pdf
+*.tex
+!templates/latex/*.tex
+*.docx
+
+# OS files
+.DS_Store
+Thumbs.db

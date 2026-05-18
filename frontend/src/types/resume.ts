@@ -93,7 +93,7 @@ export interface ResumeContactInfo {
 }
 
 export interface ResumeRecommendation {
-  session_id: string;
+  generation_id: string;
   target_title: string;
   summary?: string;
   contact?: ResumeContactInfo;
@@ -168,7 +168,7 @@ export interface ATSScore {
 // ─── API Contracts ──────────────────────────────────────────────────────────
 
 export interface ResumeRecommendRequest {
-  session_id: string;
+  generation_id: string;
   profile: MasterProfile;
   emphasis?: string;
   additional_alignment_text?: string;
@@ -181,7 +181,7 @@ export interface ResumeRecommendResponse {
 }
 
 export interface ResumeRegenerateRequest {
-  session_id: string;
+  generation_id: string;
   profile: MasterProfile;
   emphasis?: string;
   additional_alignment_text?: string;
@@ -190,58 +190,13 @@ export interface ResumeRegenerateRequest {
 }
 
 export interface ResumeValidateRequest {
-  session_id: string;
+  generation_id: string;
   recommendation: ResumeRecommendation;
 }
 
 export interface ValidateResponse {
-  session_id: string;
+  generation_id: string;
   ats_score: ATSScore;
-}
-
-export interface RenderLatexRequest {
-  session_id: string;
-  recommendation: ResumeRecommendation;
-}
-
-export interface RenderLatexResponse {
-  latex_source: string;
-  warnings: string[];
-}
-
-export interface RenderPdfRequest {
-  session_id: string;
-}
-
-export interface CompileLatexSourceRequest {
-  session_id: string;
-  latex_source: string;
-}
-
-export interface ApproveGeneratePdfRequest {
-  session_id: string;
-  recommendation: ResumeRecommendation;
-}
-
-export interface RenderPdfResponse {
-  pdf_url: string;
-  compile_success: boolean;
-  compile_errors: string[];
-  compile_warnings: string[];
-  generated_tex_path?: string;
-  pdflatex_excerpt?: string;
-  line_number?: number;
-}
-
-export interface ApproveGeneratePdfResponse {
-  latex_source: string;
-  pdf_url: string;
-  compile_success: boolean;
-  compile_errors: string[];
-  compile_warnings: string[];
-  generated_tex_path?: string;
-  pdflatex_excerpt?: string;
-  line_number?: number;
 }
 
 export type EligibilityStatus = 'match' | 'partial_match' | 'hard_mismatch';
@@ -277,6 +232,7 @@ export interface PipelinePdfResult {
   requested: boolean;
   compile_success: boolean;
   pdf_url?: string;
+  expires_at?: string;
   compile_errors: string[];
   compile_warnings: string[];
   generated_tex_path?: string;
@@ -285,7 +241,7 @@ export interface PipelinePdfResult {
 }
 
 export interface PipelineGenerateResponse {
-  session_id: string;
+  generation_id: string;
   parsed_jd: ParsedJD;
   eligibility: EligibilityResult;
   recommendation: ResumeRecommendation;
@@ -295,4 +251,36 @@ export interface PipelineGenerateResponse {
   pdf: PipelinePdfResult;
   steps: PipelineStepStatus[];
   warnings: string[];
+}
+
+// ─── Direct Download Export ─────────────────────────────────────────────
+
+export interface ExportFileResponse {
+  blob: Blob;
+  filename: string;
+  file_type: 'pdf' | 'docx';
+  compile_warnings?: string[];
+  regenerated?: boolean;
+}
+
+export interface GenerationFileInfo {
+  id: string;
+  file_type: string;
+  storage_path: string;
+  expires_at: string | null;
+  is_expired: boolean;
+  created_at: string | null;
+  signed_url: string | null;
+}
+
+export interface GenerationFilesResponse {
+  generation_id: string;
+  has_files: boolean;
+  pdf_available: boolean;
+  docx_available: boolean;
+  expires_at: string | null;
+  earliest_expiry: string | null;
+  is_expired: boolean;
+  regenerate_available: boolean;
+  files: GenerationFileInfo[];
 }

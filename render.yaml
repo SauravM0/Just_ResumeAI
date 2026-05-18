@@ -7,17 +7,36 @@ services:
     dockerfilePath: ./Dockerfile
     healthCheckPath: /api/v1/health
     envVars:
+      - key: APP_ENV
+        value: production
       - key: DEBUG
         value: "false"
+      - key: PORT
+        value: "8000"
+      # CORS — set to your frontend URL (e.g. https://your-app.vercel.app)
       - key: CORS_ORIGINS
-        value: https://your-frontend.vercel.app
+        sync: false
+      # Gemini AI
       - key: GEMINI_API_KEY
         sync: false
       - key: GEMINI_MODEL
         value: gemini-2.5-flash
       - key: GEMINI_REVIEW_MODEL
         value: gemini-2.5-pro
+      # Supabase
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_STORAGE_BUCKET
+        value: generated-resumes
+      # Generated file config
+      - key: FILE_EXPIRY_DAYS
+        value: "7"
+      # Storage paths
       - key: LATEX_OUTPUT_DIR
         value: /app/output
-      - key: SESSION_DB_PATH
-        value: /app/output/sessions.sqlite3
+      - key: LATEX_TEMPLATE_DIR
+        value: /app/templates/latex

@@ -53,6 +53,7 @@ class PipelinePdfResult(BaseModel):
     requested: bool = False
     compile_success: bool = False
     pdf_url: Optional[str] = None
+    expires_at: Optional[str] = None
     compile_errors: list[str] = Field(default_factory=list)
     compile_warnings: list[str] = Field(default_factory=list)
     generated_tex_path: Optional[str] = None
@@ -61,7 +62,7 @@ class PipelinePdfResult(BaseModel):
 
 
 class PipelineGenerateResponse(BaseModel):
-    session_id: str
+    generation_id: str
     parsed_jd: ParsedJD
     eligibility: EligibilityResult
     recommendation: ResumeRecommendation

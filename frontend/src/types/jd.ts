@@ -54,7 +54,7 @@ export interface JDAnalyzeRequest {
 }
 
 export interface JDAnalyzeResponse {
-  session_id: string;
+  generation_id: string;
   parsed_jd: ParsedJD;
   warnings: string[];
 }

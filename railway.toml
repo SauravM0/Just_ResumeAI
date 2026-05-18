@@ -1,0 +1,58 @@
+[build]
+  builder = "DOCKERFILE"
+  dockerfilePath = "./Dockerfile"
+
+[deploy]
+  startCommand = "python -m app.main"
+  healthcheckPath = "/api/v1/health"
+  healthcheckTimeout = 10
+  restartPolicyType = "always"
+
+[[service.variables]]
+  key = "APP_ENV"
+  value = "production"
+
+[[service.variables]]
+  key = "DEBUG"
+  value = "false"
+
+[[service.variables]]
+  key = "PORT"
+  value = "8000"
+
+[[service.secrets]]
+  key = "GEMINI_API_KEY"
+
+[[service.secrets]]
+  key = "GEMINI_MODEL"
+
+[[service.secrets]]
+  key = "GEMINI_REVIEW_MODEL"
+
+[[service.secrets]]
+  key = "SUPABASE_URL"
+
+[[service.secrets]]
+  key = "SUPABASE_JWT_SECRET"
+
+[[service.secrets]]
+  key = "SUPABASE_SERVICE_ROLE_KEY"
+
+[[service.secrets]]
+  key = "CORS_ORIGINS"
+
+[[service.variables]]
+  key = "SUPABASE_STORAGE_BUCKET"
+  value = "generated-resumes"
+
+[[service.variables]]
+  key = "FILE_EXPIRY_DAYS"
+  value = "7"
+
+[[service.variables]]
+  key = "LATEX_OUTPUT_DIR"
+  value = "/app/output"
+
+[[service.variables]]
+  key = "LATEX_TEMPLATE_DIR"
+  value = "/app/templates/latex"

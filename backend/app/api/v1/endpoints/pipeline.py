@@ -4,13 +4,14 @@ End-to-end resume generation endpoint.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.config import get_settings
-from app.dependencies.user import get_current_user_id
+from app.dependencies.auth import get_current_user
 from app.ai.gemini_client import GeminiClientError
 from app.ai.orchestrators.jd_orchestrator import analyze_jd
 from app.ai.orchestrators.resume_orchestrator import generate_recommendation
@@ -25,12 +26,17 @@ from app.schemas.pipeline import (
 from app.services.ats_alignment_service import build_ats_alignment_report
 from app.services.ats_keyword_planner import build_ats_keyword_plan
 from app.services.ats_pre_check import validate_ats_readiness
-from app.services.keyword_placement_service import inject_missing_keywords, build_master_keyword_list
+from app.services.keyword_placement_service import inject_missing_keywords
 from app.services.latex_render_service import render_latex
 from app.services.pdf_compile_service import PDFCompileError, compile_pdf
 from app.services.resume_budget_service import fit_resume_to_page_budget
 from app.services.scoring_service import compute_ats_score
-from app.services.session_service import create_session, save_session
+from app.services.generation_service import (
+    create_generation,
+    update_generation,
+)
+from app.services.supabase_service import get_supabase_service
+from app.schemas.supabase import ResumeGenerationUpdate
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/pipeline", tags=["pipeline"])
@@ -47,31 +53,59 @@ def _safe_tex_reference(path: str | None) -> str | None:
 @router.post("/generate", response_model=PipelineGenerateResponse)
 async def generate_resume_pipeline(
     request: PipelineGenerateRequest,
-    user_id: str = Depends(get_current_user_id),
+    current_user = Depends(get_current_user),
 ):
     """
     Run Profile + JD through analysis, recommendation, ATS, LaTeX,
     and optional PDF compilation in one explicit flow.
+    
+    Uses Supabase resume_generations table for persistent storage.
     """
     steps: list[PipelineStepStatus] = []
     warnings: list[str] = []
-    session = None
+    generation_id: str | None = None
 
     def mark(name: str, status: str, detail: str | None = None) -> None:
         steps.append(PipelineStepStatus(name=name, status=status, detail=detail))
 
+    MIN_JD_LENGTH = 50
+    if not request.raw_jd_text or len(request.raw_jd_text.strip()) < MIN_JD_LENGTH:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Job description is too short ({len(request.raw_jd_text.strip())} characters). "
+                   f"Please provide at least {MIN_JD_LENGTH} characters for meaningful analysis.",
+        )
+
     try:
-        session = create_session(user_id=user_id)
-        mark("create_session", "success")
+        user_id_str = current_user.user_id
+        
+        generation = create_generation(
+            user_id=user_id_str,
+            raw_jd_text=request.raw_jd_text,
+        )
+        generation_id = str(generation.id)
+        mark("create_generation", "success")
 
         try:
             parsed_jd = await analyze_jd(request.raw_jd_text)
-            session.parsed_jd = parsed_jd
-            save_session(session)
+            update_generation(
+                user_id=user_id_str,
+                generation_id=generation_id,
+                update_data=ResumeGenerationUpdate(
+                    parsed_jd_json=parsed_jd.model_dump(),
+                    job_title=parsed_jd.job_title,
+                    company=parsed_jd.company,
+                ),
+            )
             mark("analyze_jd", "success")
         except Exception as exc:
-            logger.exception("[%s] JD analysis failed", session.session_id)
+            logger.exception("[%s] JD analysis failed", generation_id)
             mark("analyze_jd", "failed", str(exc))
+            update_generation(
+                user_id=user_id_str,
+                generation_id=generation_id,
+                update_data=ResumeGenerationUpdate(status="failed", latex_source=None),
+            )
             raise HTTPException(status_code=502, detail=f"JD analysis failed: {exc}") from exc
 
         clean_profile = _flag_weak_profile_bullets(request.profile)
@@ -89,17 +123,12 @@ async def generate_resume_pipeline(
             recommendation = await generate_recommendation(
                 profile=clean_profile,
                 parsed_jd=parsed_jd,
-                session_id=session.session_id,
+                generation_id=generation_id,
                 emphasis=request.emphasis,
                 target_pages=request.target_pages,
                 additional_alignment_text=request.additional_alignment_text,
                 ats_plan=ats_plan,
             )
-            # ── Phase 5: Keyword Injection Post-Processor ─────────────────────────
-            # Deterministically inject any JD keywords missing from the resume.
-            # This runs after quality gate (so skills are populated) but before
-            # strength service (so injected skills get properly categorized).
-            # This guarantees 100% keyword coverage by construction.
             recommendation = inject_missing_keywords(
                 recommendation=recommendation,
                 parsed_jd=parsed_jd,
@@ -108,14 +137,18 @@ async def generate_resume_pipeline(
             mark("generate_recommendation", "success")
         except GeminiClientError as exc:
             logger.warning(
-                "[%s] Gemini recommendation failed, using deterministic fallback: %s",
-                session.session_id,
-                exc,
+                "[%s] Gemini recommendation unavailable, using deterministic fallback",
+                generation_id,
+            )
+            warnings.append(
+                "AI resume generation was temporarily unavailable. "
+                "A rule-based fallback was used instead. Review the output carefully "
+                "and consider regenerating if the AI service is available."
             )
             recommendation = generate_recommendation_without_ai(
                 profile=clean_profile,
                 parsed_jd=parsed_jd,
-                session_id=session.session_id,
+                generation_id=generation_id,
                 emphasis=request.emphasis,
                 target_pages=request.target_pages,
                 additional_alignment_text=request.additional_alignment_text,
@@ -128,9 +161,17 @@ async def generate_resume_pipeline(
             )
             mark("generate_recommendation", "success", "fallback_without_ai")
         except Exception as exc:
-            logger.exception("[%s] Resume recommendation failed", session.session_id)
+            logger.exception("[%s] Resume recommendation failed", generation_id)
             mark("generate_recommendation", "failed", str(exc))
-            raise HTTPException(status_code=500, detail="Resume recommendation failed. Please retry.") from exc
+            update_generation(
+                user_id=user_id_str,
+                generation_id=generation_id,
+                update_data=ResumeGenerationUpdate(status="failed"),
+            )
+            raise HTTPException(
+                status_code=500,
+                detail="Resume recommendation is temporarily unavailable. Please retry later.",
+            ) from exc
 
         recommendation.warnings = _dedupe(recommendation.warnings)
         recommendation = fit_resume_to_page_budget(
@@ -140,7 +181,6 @@ async def generate_resume_pipeline(
             target_pages=request.target_pages,
         )
 
-        # ── Pipeline-level always-generate safety net ────────────────────
         recommendation = _enforce_always_generate_contract(
             recommendation=recommendation,
             parsed_jd=parsed_jd,
@@ -165,7 +205,7 @@ async def generate_resume_pipeline(
         )
         ats_pre_check = validate_ats_readiness(recommendation, parsed_jd)
         for warning in [*ats_pre_check.critical_gaps, *ats_pre_check.warnings]:
-            logger.warning("[%s] ATS pre-check: %s", session.session_id, warning)
+            logger.warning("[%s] ATS pre-check: %s", generation_id, warning)
         mark("compute_ats_score", "success")
         mark("ats_pre_check", "success", f"{ats_pre_check.overall_estimated_ats_score:.0%} estimated readiness")
         mark("ats_alignment_report", "success", f"{alignment_report.overall_alignment_percent:.0f}% alignment")
@@ -174,13 +214,21 @@ async def generate_resume_pipeline(
             latex_source = render_latex(recommendation)
             mark("render_latex", "success")
         except Exception as exc:
-            logger.exception("[%s] LaTeX rendering failed", session.session_id)
+            logger.exception("[%s] LaTeX rendering failed", generation_id)
             mark("render_latex", "failed", str(exc))
             raise HTTPException(status_code=500, detail=f"LaTeX rendering failed: {exc}") from exc
 
-        session.recommendation = recommendation
-        session.latex_source = latex_source
-        save_session(session)
+        update_generation(
+            user_id=user_id_str,
+            generation_id=generation_id,
+            update_data=ResumeGenerationUpdate(
+                resume_json=recommendation.model_dump(),
+                ats_score_json=ats_score.model_dump(),
+                alignment_report_json=alignment_report.model_dump(),
+                ats_pre_check_json=dataclasses.asdict(ats_pre_check) if ats_pre_check else None,
+                latex_source=latex_source,
+            ),
+        )
         mark("save_outputs", "success")
 
         pdf = PipelinePdfResult(requested=request.generate_pdf)
@@ -188,23 +236,22 @@ async def generate_resume_pipeline(
             try:
                 pdf_path, compile_warnings = await compile_pdf(
                     latex_source=latex_source,
-                    session_id=session.session_id,
+                    generation_id=generation_id,
                 )
-                pdf_filename = pdf_path.split("/")[-1].split("\\")[-1]
+                Path(pdf_path).unlink(missing_ok=True)
                 pdf = PipelinePdfResult(
                     requested=True,
                     compile_success=True,
-                    pdf_url=f"/api/v1/resume/download/{pdf_filename}",
                     compile_warnings=compile_warnings,
                 )
                 mark("compile_pdf", "success")
             except PDFCompileError as exc:
                 message = "; ".join(exc.errors) if exc.errors else str(exc)
-                warning = f"LaTeX generated successfully, PDF compile failed: {message}"
-                warnings.append(warning)
+                warning_msg = f"LaTeX generated successfully, PDF compile failed: {message}"
+                warnings.append(warning_msg)
                 logger.error(
                     "[%s] Pipeline PDF compilation failed. tex=%s line=%s errors=%s excerpt=%s raw=%s",
-                    session.session_id,
+                    generation_id,
                     exc.generated_tex_path,
                     exc.line_number,
                     exc.errors,
@@ -222,9 +269,9 @@ async def generate_resume_pipeline(
                 )
                 mark("compile_pdf", "failed", message)
             except Exception as exc:
-                logger.exception("[%s] Unexpected PDF compilation failure", session.session_id)
-                warning = f"LaTeX generated successfully, PDF compile failed: {exc}"
-                warnings.append(warning)
+                logger.exception("[%s] Unexpected PDF compilation failure", generation_id)
+                warning_msg = f"LaTeX generated successfully, PDF compile failed: {exc}"
+                warnings.append(warning_msg)
                 pdf = PipelinePdfResult(
                     requested=True,
                     compile_success=False,
@@ -234,10 +281,24 @@ async def generate_resume_pipeline(
         else:
             mark("compile_pdf", "skipped", "generate_pdf=false")
 
+        update_generation(
+            user_id=user_id_str,
+            generation_id=generation_id,
+            update_data=ResumeGenerationUpdate(status="completed"),
+        )
+
+        svc = get_supabase_service()
+        svc.log_usage_event(
+            user_id=user_id_str,
+            event_type="resume_generate",
+            generation_id=generation_id,
+            metadata={"status": "completed"},
+        )
+
         all_warnings = _dedupe(warnings + recommendation.warnings + parsed_jd.quality_warnings)
 
         return PipelineGenerateResponse(
-            session_id=session.session_id,
+            generation_id=generation_id,
             parsed_jd=parsed_jd,
             eligibility=eligibility,
             recommendation=recommendation,
@@ -253,8 +314,7 @@ async def generate_resume_pipeline(
     except HTTPException:
         raise
     except Exception as exc:
-        session_id = session.session_id if session else "no-session"
-        logger.exception("[%s] Unexpected pipeline failure", session_id)
+        logger.exception("[%s] Unexpected pipeline failure", generation_id or "no-generation")
         raise HTTPException(status_code=500, detail="Pipeline generation failed. Please retry.") from exc
 
 

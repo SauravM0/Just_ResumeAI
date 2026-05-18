@@ -1,14 +1,12 @@
-/**
- * JD Input page — user pastes a job description, AI analyzes it.
- */
-
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useMutation } from '@tanstack/react-query';
 import { generateResumePipeline } from '../lib/api';
-import { getDefaultProfile, saveRecentResumeSnapshot } from '../lib/db';
+import { getMyProfile } from '../lib/profileApi';
 import { sanitizeProfile } from '../lib/profile';
 import { useAppStore } from '../store/useAppStore';
+import PageHeader from '../components/ui/PageHeader';
+import PrimaryActionBar from '../components/ui/PrimaryActionBar';
 import type { MasterProfile } from '../types/profile';
 
 function hasSavedProfile(profile: MasterProfile | null): profile is MasterProfile {
@@ -22,7 +20,7 @@ export default function JDInput() {
   const [strictOnePage, setStrictOnePage] = useState(true);
   const [generatePdfAfterReview, setGeneratePdfAfterReview] = useState(false);
   const {
-    setSessionId,
+    setGenerationId,
     setParsedJD,
     setRecommendation,
     setAtsScore,
@@ -33,17 +31,10 @@ export default function JDInput() {
     setActiveProfile,
   } = useAppStore();
 
-  const pipelineMutation = useMutation({
+const pipelineMutation = useMutation({
     mutationFn: generateResumePipeline,
     onSuccess: (data) => {
-      void saveRecentResumeSnapshot({
-        sessionId: data.session_id,
-        parsedJD: data.parsed_jd,
-        recommendation: data.recommendation,
-        atsScore: data.ats_score,
-        pipelinePdf: data.pdf,
-      });
-      setSessionId(data.session_id);
+      setGenerationId(data.generation_id);
       setParsedJD(data.parsed_jd);
       setRecommendation(data.recommendation);
       setAtsScore(data.ats_score);
@@ -51,30 +42,34 @@ export default function JDInput() {
       setLatexSource(data.latex_source);
       setPipelinePdf(data.pdf);
       setStep('resume-review');
-      navigate('/review');
+      navigate(`/review/${data.generation_id}`);
     },
   });
 
   const handleAnalyze = async () => {
     if (rawJD.trim().length < 50) return;
-    const savedProfile = await getDefaultProfile();
-    if (!hasSavedProfile(savedProfile)) {
-      setActiveProfile(null);
-      setBlockingError('No saved master profile found. Please save your profile before analyzing a job description.');
-      return;
-    }
+    try {
+      const savedProfile = (await getMyProfile()).profile_json;
+      if (!hasSavedProfile(savedProfile)) {
+        setActiveProfile(null);
+        setBlockingError('No saved master profile found. Please save your profile before analyzing a job description.');
+        return;
+      }
 
-    const normalizedProfile = sanitizeProfile(savedProfile);
-    setActiveProfile(normalizedProfile);
-    setBlockingError(null);
-    pipelineMutation.mutate({
-      profile: normalizedProfile,
-      raw_jd_text: rawJD,
-      target_pages: 1,
-      allow_two_pages_for_senior: !strictOnePage,
-      generate_pdf: generatePdfAfterReview,
-      additional_alignment_text: undefined,
-    });
+      const normalizedProfile = sanitizeProfile(savedProfile);
+      setActiveProfile(normalizedProfile);
+      setBlockingError(null);
+      pipelineMutation.mutate({
+        profile: normalizedProfile,
+        raw_jd_text: rawJD,
+        target_pages: 1,
+        allow_two_pages_for_senior: !strictOnePage,
+        generate_pdf: generatePdfAfterReview,
+        additional_alignment_text: undefined,
+      });
+    } catch (error) {
+      setBlockingError(error instanceof Error ? error.message : 'Unable to load your master profile.');
+    }
   };
 
   const charCount = rawJD.length;
@@ -82,25 +77,28 @@ export default function JDInput() {
 
   return (
     <div className="animate-fade-in">
-      <div className="page-header">
-        <h1 className="page-title">Paste JD & Generate One-Page Resume</h1>
-        <p className="page-subtitle">
-          Paste the job description and generate a tailored resume for review.
-        </p>
-      </div>
+      <PageHeader
+        title="New Resume"
+        subtitle="Paste a job description to generate a tailored ATS resume."
+        actions={
+          <button className="btn btn-ghost" onClick={() => navigate('/profile')}>
+            Edit Profile
+          </button>
+        }
+      />
 
       <div className="card">
         <div className="form-group">
-          <label className="form-label">Job Description Text</label>
+          <label className="form-label">Job Description</label>
           <textarea
             className="form-textarea"
             value={rawJD}
             onChange={(e) => setRawJD(e.target.value)}
             placeholder={`Paste the full job description here...\n\nInclude:\n- Job title and company\n- Requirements and qualifications\n- Responsibilities\n- Preferred skills\n- Experience requirements`}
-            style={{ minHeight: '350px', fontFamily: 'var(--font-sans)' }}
+            style={{ minHeight: '300px', fontFamily: 'var(--font-sans)' }}
             disabled={pipelineMutation.isPending}
           />
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-xs)' }}>
             <span className="form-hint">
               {charCount < 50
                 ? `Minimum 50 characters required (${50 - charCount} more needed)`
@@ -172,36 +170,38 @@ export default function JDInput() {
           </div>
         )}
 
-        <div style={{ display: 'flex', gap: 'var(--space-md)', justifyContent: 'flex-end' }}>
-          <button className="btn btn-ghost" onClick={() => setRawJD('')} disabled={!rawJD || pipelineMutation.isPending}>
-            Clear
-          </button>
-          <button
-            className="btn btn-primary btn-lg"
-            onClick={handleAnalyze}
-            disabled={!isValid || pipelineMutation.isPending}
-          >
-            {pipelineMutation.isPending ? (
-              <>
-                <span className="spinner" />
-                Generating ATS resume...
-              </>
-            ) : (
-              'Generate One-Page ATS Resume'
-            )}
-          </button>
-        </div>
+        <PrimaryActionBar>
+          <div style={{ display: 'flex', gap: 'var(--space-sm)', width: '100%', justifyContent: 'flex-end' }}>
+            <button className="btn btn-ghost" onClick={() => setRawJD('')} disabled={!rawJD || pipelineMutation.isPending}>
+              Clear
+            </button>
+            <button
+              className="btn btn-primary btn-lg"
+              onClick={handleAnalyze}
+              disabled={!isValid || pipelineMutation.isPending}
+            >
+              {pipelineMutation.isPending ? (
+                <>
+                  <span className="spinner" />
+                  Generating...
+                </>
+              ) : (
+                'Generate Resume'
+              )}
+            </button>
+          </div>
+        </PrimaryActionBar>
       </div>
 
       <div className="card" style={{ marginTop: 'var(--space-lg)' }}>
         <div className="card-title" style={{ marginBottom: 'var(--space-md)' }}>Tips for Best Results</div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: 'var(--space-md)' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 'var(--space-md)' }}>
           {[
-            'Paste complete JD for best keyword extraction.',
+            'Paste the complete JD for best keyword extraction.',
             'Include responsibilities and required skills.',
           ].map((tip, i) => (
             <div key={i} style={{ display: 'flex', gap: 'var(--space-sm)', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-              <span>✓</span>
+              <span style={{ flexShrink: 0 }}>✓</span>
               <span>{tip}</span>
             </div>
           ))}

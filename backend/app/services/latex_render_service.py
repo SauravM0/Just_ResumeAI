@@ -1,5 +1,6 @@
 """
 LaTeX render service - maps resume recommendation data to the fixed LaTeX template.
+Respects the full section_order from the recommendation.
 """
 
 from __future__ import annotations
@@ -162,7 +163,7 @@ def render_latex(recommendation: ResumeRecommendation) -> str:
     template = env.get_template("resume_template.tex")
     latex_source = template.render(**context)
 
-    logger.info("[%s] LaTeX rendered (%s chars)", recommendation.session_id, len(latex_source))
+    logger.info("[%s] LaTeX rendered (%s chars)", recommendation.generation_id, len(latex_source))
     return latex_source
 
 
@@ -245,8 +246,6 @@ def _build_template_context(rec: ResumeRecommendation) -> dict:
             continue
         experiences.append({
             "title": escape_latex(exp.title),
-            # Keep company and location separate because the template displays
-            # argument 4 on the right; mixing them hurts scan order and wastes space.
             "company_line": escape_latex(exp.company),
             "location": escape_latex(exp.location or ""),
             "date_range": escape_latex(f"{exp.start_date} -- {exp.end_date or 'Present'}"),
@@ -326,6 +325,11 @@ def _build_template_context(rec: ResumeRecommendation) -> dict:
                 "items": items,
             })
 
+    section_order = rec.section_order if rec.section_order else [
+        "summary", "education", "technical skills", "experience",
+        "projects", "certifications", "achievements"
+    ]
+
     return {
         "contact_name": escape_latex(rec.contact.full_name) if rec.contact else "",
         "contact_email": escape_latex(rec.contact.email) if rec.contact else "",
@@ -343,10 +347,5 @@ def _build_template_context(rec: ResumeRecommendation) -> dict:
         "certifications": certifications,
         "achievements": achievements,
         "custom_sections": custom_sections,
-        "fresher_order": _is_fresher_order(rec),
+        "section_order_list": section_order,
     }
-
-
-def _is_fresher_order(rec: ResumeRecommendation) -> bool:
-    order = [section.casefold() for section in rec.section_order]
-    return "education" in order and "technical skills" in order and order.index("education") < order.index("technical skills")

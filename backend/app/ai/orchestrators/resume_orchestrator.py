@@ -244,7 +244,7 @@ def _render_composer_system_prompt(
 async def generate_recommendation(
     profile: MasterProfile,
     parsed_jd: ParsedJD,
-    session_id: str,
+    generation_id: str,
     emphasis: str | None = None,
     rejected_ids: list[str] | None = None,
     locked_bullets: dict[str, str] | None = None,
@@ -262,7 +262,7 @@ async def generate_recommendation(
     Args:
         profile: User's master profile.
         parsed_jd: Structured JD from the analyzer.
-        session_id: Session identifier for this flow.
+        generation_id: Supabase resume generation identifier for this flow.
         emphasis: Optional user emphasis (e.g. "leadership", "backend").
         rejected_ids: IDs to exclude from recommendations.
         locked_bullets: Bullet ID → text pairs to preserve exactly.
@@ -280,7 +280,7 @@ async def generate_recommendation(
     profile = _enrich_thin_profile(profile, parsed_jd)
 
     # ── Step 1: Relevance Matching ───────────────────────────────────────
-    logger.info(f"[{session_id}] Step 1: Relevance matching")
+    logger.info(f"[{generation_id}] Step 1: Relevance matching")
 
     # Filter out rejected items before sending to AI
     filtered_experience = [e for e in profile.work_experience if e.id not in rejected_ids]
@@ -301,7 +301,7 @@ async def generate_recommendation(
     )
 
     # ── Step 2: Resume Composition ───────────────────────────────────────
-    logger.info(f"[{session_id}] Step 2: Resume composition")
+    logger.info(f"[{generation_id}] Step 2: Resume composition")
 
     # Select top items by relevance score
     top_exp_ids = _select_top_items(relevance.experience_scores, MAX_EXPERIENCES)
@@ -349,10 +349,10 @@ async def generate_recommendation(
     )
 
     # ── Step 3: Assemble and enforce rules ───────────────────────────────
-    logger.info(f"[{session_id}] Step 3: Assembling recommendation")
+    logger.info(f"[{generation_id}] Step 3: Assembling recommendation")
 
     recommendation = _assemble_recommendation(
-        session_id=session_id,
+        generation_id=generation_id,
         profile=profile,
         parsed_jd=parsed_jd,
         relevance=relevance,
@@ -664,7 +664,7 @@ def _clean_grammar_errors(text: str) -> str:
 
 
 def _assemble_recommendation(
-    session_id: str,
+    generation_id: str,
     profile: MasterProfile,
     parsed_jd: ParsedJD,
     relevance: _RelevanceResult,
@@ -773,7 +773,7 @@ def _assemble_recommendation(
     )
 
     return ResumeRecommendation(
-        session_id=session_id,
+        generation_id=generation_id,
         target_title=composed.target_title,
         summary=composed.summary,
         contact=contact,

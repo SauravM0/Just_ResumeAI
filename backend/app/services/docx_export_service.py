@@ -12,8 +12,8 @@ from app.schemas.resume import BulletStatus, ResumeRecommendation
 from app.services.latex_render_service import sanitize_recommendation
 
 
-def export_resume_docx(recommendation: ResumeRecommendation, session_id: str) -> str:
-    """Generate a simple single-column DOCX with standard ATS headings."""
+def export_resume_docx(recommendation: ResumeRecommendation, generation_id: str) -> str:
+    """Generate a simple single-column DOCX respecting section_order."""
     rec = sanitize_recommendation(recommendation)
     document = Document()
     styles = document.styles
@@ -53,53 +53,43 @@ def export_resume_docx(recommendation: ResumeRecommendation, session_id: str) ->
         paragraph.alignment = 1
         paragraph.add_run(rec.target_title).bold = True
 
-    _add_section(document, "Professional Summary")
-    if rec.summary:
-        document.add_paragraph(_clean(rec.summary))
+    section_order = rec.section_order if rec.section_order else [
+        "summary", "education", "technical skills", "experience",
+        "projects", "certifications", "achievements"
+    ]
 
-    fresher_order = _is_fresher_order(rec)
-    if fresher_order:
-        _write_education(document, rec)
-
-    if rec.skills:
-        _add_section(document, "Technical Skills")
-        for group in rec.skills:
-            if not group.skills:
-                continue
-            paragraph = document.add_paragraph()
-            paragraph.add_run(f"{group.category}: ").bold = True
-            paragraph.add_run(", ".join(_clean(skill) for skill in group.skills if _clean(skill)))
-
-    if fresher_order:
-        _write_projects(document, rec)
-
-    if rec.experience:
-        _add_section(document, "Professional Experience")
-        for exp in rec.experience:
-            if not exp.included or not exp.bullets:
-                continue
-            _add_heading_line(document, exp.title, exp.company, f"{exp.start_date} - {exp.end_date or 'Present'}")
-            for bullet in exp.bullets:
-                _add_bullet(document, bullet)
-
-    if not fresher_order:
-        _write_projects(document, rec)
-
-    if not fresher_order:
-        _write_education(document, rec)
-
-    achievements = [*rec.achievements, *rec.awards]
-    if fresher_order:
-        _write_achievements(document, achievements)
-
-    if rec.certifications:
-        _add_section(document, "Certifications")
-        for cert in rec.certifications:
-            if cert.included and cert.name:
-                document.add_paragraph(" | ".join(part for part in [cert.name, cert.issuing_org or "", cert.date or ""] if part))
-
-    if not fresher_order:
-        _write_achievements(document, achievements)
+    for section_name in section_order:
+        if section_name == "summary" and rec.summary:
+            _add_section(document, "Professional Summary")
+            document.add_paragraph(_clean(rec.summary))
+        elif section_name in ("technical skills", "skills") and rec.skills:
+            _add_section(document, "Technical Skills")
+            for group in rec.skills:
+                if not group.skills:
+                    continue
+                paragraph = document.add_paragraph()
+                paragraph.add_run(f"{group.category}: ").bold = True
+                paragraph.add_run(", ".join(_clean(skill) for skill in group.skills if _clean(skill)))
+        elif section_name == "experience" and rec.experience:
+            _add_section(document, "Professional Experience")
+            for exp in rec.experience:
+                if not exp.included or not exp.bullets:
+                    continue
+                _add_heading_line(document, exp.title, exp.company, f"{exp.start_date} - {exp.end_date or 'Present'}")
+                for bullet in exp.bullets:
+                    _add_bullet(document, bullet)
+        elif section_name == "projects":
+            _write_projects(document, rec)
+        elif section_name == "education" and rec.education:
+            _write_education(document, rec)
+        elif section_name in ("achievements", "awards"):
+            achievements = [*rec.achievements, *rec.awards]
+            _write_achievements(document, achievements)
+        elif section_name == "certifications" and rec.certifications:
+            _add_section(document, "Certifications")
+            for cert in rec.certifications:
+                if cert.included and cert.name:
+                    document.add_paragraph(" | ".join(part for part in [cert.name, cert.issuing_org or "", cert.date or ""] if part))
 
     for section in rec.custom_sections:
         if section.included and section.items:
@@ -111,7 +101,7 @@ def export_resume_docx(recommendation: ResumeRecommendation, session_id: str) ->
     settings = get_settings()
     output_dir = Path(settings.LATEX_OUTPUT_DIR)
     output_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"resume_{session_id}_{uuid.uuid4().hex[:6]}.docx"
+    filename = f"resume_{generation_id}_{uuid.uuid4().hex[:6]}.docx"
     output_path = output_dir / filename
     document.save(output_path)
     return str(output_path)
@@ -172,11 +162,6 @@ def _write_achievements(document: Document, achievements) -> None:
                 document.add_paragraph(line)
                 if item.description:
                     document.add_paragraph(_clean(item.description), style="List Bullet")
-
-
-def _is_fresher_order(rec: ResumeRecommendation) -> bool:
-    order = [section.casefold() for section in rec.section_order]
-    return "education" in order and "technical skills" in order and order.index("education") < order.index("technical skills")
 
 
 def _clean(value: str | None) -> str:

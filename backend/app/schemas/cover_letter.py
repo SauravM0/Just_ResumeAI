@@ -9,19 +9,14 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 from .profile import MasterProfile
-from .jd import ParsedJD
-from .resume import ResumeRecommendation
 
 
-class CoverLetterRequest(BaseModel):
-    """POST /api/v1/cover-letter/generate"""
-    session_id: str
+class CoverLetterGenerateRequest(BaseModel):
+    """POST /api/v1/cover-letter/{generation_id}/generate"""
     profile: MasterProfile
-    parsed_jd: ParsedJD
-    recommendation: ResumeRecommendation
     job_title: Optional[str] = Field(
         None,
-        description="Target job title (uses parsed_jd.job_title if not provided)"
+        description="Target job title"
     )
     tone: str = Field(
         default="Professional",
@@ -35,7 +30,12 @@ class CoverLetterRequest(BaseModel):
 
 class CoverLetterResponse(BaseModel):
     """Generated cover letter."""
-    session_id: str
+    generation_id: str
     cover_letter_text: str
     word_count: int = 0
     warnings: list[str] = Field(default_factory=list)
+
+
+class CoverLetterUpdateRequest(BaseModel):
+    """PUT /api/v1/cover-letter/{generation_id}"""
+    cover_letter_text: str = Field(..., min_length=1)

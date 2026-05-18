@@ -74,7 +74,7 @@ def score_text_against_jd(text: str | None, jd_terms: set[str]) -> tuple[float, 
 def generate_recommendation_without_ai(
     profile: MasterProfile,
     parsed_jd: ParsedJD,
-    session_id: str,
+    generation_id: str,
     emphasis: str | None = None,
     rejected_ids: list[str] | None = None,
     locked_bullets: dict[str, str] | None = None,
@@ -185,7 +185,7 @@ def generate_recommendation_without_ai(
         )
 
     recommendation = ResumeRecommendation(
-        session_id=session_id,
+        generation_id=generation_id,
         target_title=target_title,
         summary=summary,
         contact=contact,
