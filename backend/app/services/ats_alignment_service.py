@@ -8,6 +8,7 @@ from app.schemas.ats_planner import ATSKeywordPlannerOutput
 from app.schemas.jd import ParsedJD
 from app.schemas.resume import ResumeRecommendation, BulletStatus
 from app.services.keyword_placement_service import analyze_keyword_placement
+from app.services.synonym_service import get_all_forms
 
 
 def build_ats_alignment_report(
@@ -43,9 +44,10 @@ def build_ats_alignment_report(
         + section_score * 0.08
     )
     if keyword_coverage < 50:
-        overall = min(overall, 60.0)
+        overall -= (50 - keyword_coverage) * 0.30
     elif keyword_coverage < 65:
-        overall = min(overall, 72.0)
+        overall -= (65 - keyword_coverage) * 0.15
+    overall = _clamp_percent(overall)
 
     return ATSAlignmentReport(
         overall_alignment_percent=round(overall, 1),
@@ -112,10 +114,17 @@ def _resume_corpus(recommendation: ResumeRecommendation) -> str:
     for cert in recommendation.certifications:
         if cert.included:
             parts.extend([cert.name, cert.issuing_org or ""])
+    for achievement in [*recommendation.achievements, *recommendation.awards]:
+        if achievement.included:
+            parts.extend([achievement.title, achievement.issuer or "", achievement.description or ""])
     return _normalize(" ".join(parts))
 
 
 def _contains_keyword(corpus: str, keyword: str) -> bool:
+    return any(_contains_keyword_exact(corpus, form) for form in get_all_forms(keyword))
+
+
+def _contains_keyword_exact(corpus: str, keyword: str) -> bool:
     normalized = _normalize(keyword)
     if not normalized:
         return False
@@ -192,6 +201,14 @@ def _dedupe_strings(values: list[str]) -> list[str]:
         seen.add(key)
         deduped.append(cleaned)
     return deduped
+
+
+def _clamp_percent(value: float) -> float:
+    if value < 0.0:
+        return 0.0
+    if value > 100.0:
+        return 100.0
+    return value
 
 
 def _normalize(value: str | None) -> str:

@@ -3,12 +3,44 @@
  */
 
 import type { ResumeRecommendation } from '../../types/resume';
+import { objectArray, stringArray } from '../../lib/resumeSafe';
 
 interface ResumePreviewProps {
   recommendation: ResumeRecommendation;
 }
 
+type PreviewBullet = { id?: string; text?: string; status?: string };
+type PreviewExperience = {
+  source_id?: string;
+  title?: string;
+  company?: string;
+  start_date?: string;
+  end_date?: string;
+  included?: boolean;
+  bullets?: unknown;
+};
+type PreviewProject = {
+  source_id?: string;
+  name?: string;
+  technologies?: unknown;
+  included?: boolean;
+  bullets?: unknown;
+};
+type PreviewEducation = {
+  source_id?: string;
+  institution?: string;
+  degree?: string;
+  field_of_study?: string;
+  start_date?: string;
+  end_date?: string;
+  gpa?: string;
+  included?: boolean;
+};
+
 export default function ResumePreview({ recommendation }: ResumePreviewProps) {
+  const visibleSkillGroups = objectArray<{ category?: string; skills?: unknown }>(recommendation.skills).filter((group) =>
+    (group.category || '').trim() && stringArray(group.skills).some((skill) => skill.trim()),
+  );
   const orderedSections = recommendation.section_order?.length > 0
     ? recommendation.section_order
     : ['summary', 'skills', 'experience', 'projects', 'education'];
@@ -18,13 +50,13 @@ export default function ResumePreview({ recommendation }: ResumePreviewProps) {
       case 'summary':
         return Boolean(recommendation.summary);
       case 'skills':
-        return recommendation.skills.length > 0;
+        return visibleSkillGroups.length > 0;
       case 'experience':
-        return recommendation.experience.filter(e => e.included).length > 0;
+        return objectArray<{ included?: boolean }>(recommendation.experience).filter(e => e.included).length > 0;
       case 'projects':
-        return recommendation.projects.filter(p => p.included).length > 0;
+        return objectArray<{ included?: boolean }>(recommendation.projects).filter(p => p.included).length > 0;
       case 'education':
-        return recommendation.education.filter(e => e.included).length > 0;
+        return objectArray<{ included?: boolean }>(recommendation.education).filter(e => e.included).length > 0;
       case 'certifications':
         return recommendation.certifications?.filter(c => c.included).length > 0;
       case 'achievements':
@@ -77,9 +109,9 @@ export default function ResumePreview({ recommendation }: ResumePreviewProps) {
               return (
                 <section key={section} className="preview-section">
                   <h2 className="preview-section-title">Skills</h2>
-                  {recommendation.skills.map((group, idx) => (
+                  {visibleSkillGroups.map((group, idx) => (
                     <div key={idx} className="preview-skills-group">
-                      <strong>{group.category}:</strong> {group.skills.join(', ')}
+                      <strong>{group.category}:</strong> {stringArray(group.skills).filter((skill) => skill.trim()).join(', ')}
                     </div>
                   ))}
                 </section>
@@ -88,7 +120,7 @@ export default function ResumePreview({ recommendation }: ResumePreviewProps) {
               return (
                 <section key={section} className="preview-section">
                   <h2 className="preview-section-title">Experience</h2>
-                  {recommendation.experience.filter(e => e.included).map(exp => (
+                  {objectArray<PreviewExperience>(recommendation.experience).filter(e => e.included).map(exp => (
                     <div key={exp.source_id} className="preview-entry">
                       <div className="preview-entry-header">
                         <span className="preview-entry-title">{exp.title}</span>
@@ -98,7 +130,7 @@ export default function ResumePreview({ recommendation }: ResumePreviewProps) {
                       </div>
                       <div className="preview-entry-subtitle">{exp.company}</div>
                       <ul className="preview-bullets">
-                        {exp.bullets.filter(b => b.status !== 'rejected').map(bullet => (
+                        {objectArray<PreviewBullet>(exp.bullets).filter(b => b.status !== 'rejected').map(bullet => (
                           <li key={bullet.id}>{bullet.text}</li>
                         ))}
                       </ul>
@@ -110,14 +142,14 @@ export default function ResumePreview({ recommendation }: ResumePreviewProps) {
               return (
                 <section key={section} className="preview-section">
                   <h2 className="preview-section-title">Projects</h2>
-                  {recommendation.projects.filter(p => p.included).map(proj => (
+                  {objectArray<PreviewProject>(recommendation.projects).filter(p => p.included).map(proj => (
                     <div key={proj.source_id} className="preview-entry">
                       <div className="preview-entry-header">
                         <span className="preview-entry-title">{proj.name}</span>
-                        <span className="preview-entry-tech">{proj.technologies.join(', ')}</span>
+                        <span className="preview-entry-tech">{stringArray(proj.technologies).join(', ')}</span>
                       </div>
                       <ul className="preview-bullets">
-                        {proj.bullets.filter(b => b.status !== 'rejected').map(bullet => (
+                        {objectArray<PreviewBullet>(proj.bullets).filter(b => b.status !== 'rejected').map(bullet => (
                           <li key={bullet.id}>{bullet.text}</li>
                         ))}
                       </ul>
@@ -129,7 +161,7 @@ export default function ResumePreview({ recommendation }: ResumePreviewProps) {
               return (
                 <section key={section} className="preview-section">
                   <h2 className="preview-section-title">Education</h2>
-                  {recommendation.education.filter(e => e.included).map(edu => (
+                  {objectArray<PreviewEducation>(recommendation.education).filter(e => e.included).map(edu => (
                     <div key={edu.source_id} className="preview-entry">
                       <div className="preview-entry-header">
                         <span className="preview-entry-title">{edu.institution}</span>

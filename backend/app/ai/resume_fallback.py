@@ -1,5 +1,14 @@
 """
 Deterministic fallback resume recommendation logic used when Gemini is unavailable.
+
+Strategy:
+- Parse JD keywords, abstract task themes, and priority skills.
+- Generate target title from JD.
+- Rewrite summary using JD terms in natural prose.
+- Reorder skills, experiences, and projects by JD relevance.
+- Rewrite bullets using candidate facts + JD vocabulary (action + skill + outcome).
+- Preserve all factual anchors (names, companies, dates, degrees, certs).
+- Produce valid resume JSON that renders in main.tex and passes ATS scoring.
 """
 
 from __future__ import annotations
@@ -8,7 +17,12 @@ import re
 from collections import Counter
 from datetime import date
 
-from app.domain.rules import MAX_EXPERIENCES, MAX_PROJECTS, MAX_BULLET_LENGTH
+from app.domain.rules import (
+    MAX_BULLET_LENGTH,
+    MAX_EXPERIENCES,
+    MAX_PROJECTS,
+    MIN_BULLET_LENGTH,
+)
 from app.schemas.ats_planner import ATSKeywordPlannerOutput
 from app.schemas.jd import ParsedJD
 from app.schemas.profile import MasterProfile, Project, WorkExperience
@@ -28,7 +42,21 @@ from app.schemas.resume import (
 from app.services.resume_strength_service import strengthen_resume_recommendation
 from app.services.resume_budget_service import fit_resume_to_page_budget
 from app.services.resume_quality_gate import apply_resume_quality_gate, build_skill_taxonomy
+from app.services.locked_fields_service import build_locked_fields, validate_locked_fields_in_output
 from app.services.resume_strategy_service import build_resume_strategy, is_fresher_intern_strategy
+from app.services.candidate_evidence_service import (
+    build_candidate_evidence,
+    classify_jd_keyword_truth,
+    contains_term,
+    is_supported_placement,
+)
+from app.services.jd_sanitization_service import sanitize_parsed_jd
+from app.services.bullet_quality_service import (
+    has_jd_boilerplate,
+    is_dangling_ending,
+    validate_single_bullet,
+    word_count,
+)
 
 _STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in", "into",
@@ -37,16 +65,37 @@ _STOPWORDS = {
     "build", "built", "work", "working", "role", "team", "teams",
 }
 
-_SUMMARY_WORD_LIMIT = 90  # Raised from 42 so deterministic fallback keeps ATS keyword density.
-_TOP_EXPERIENCE_BULLETS = 5  # Raised from 3 to match the main pipeline depth target.
-_SECONDARY_EXPERIENCE_BULLETS = 4  # Raised from 2 so fallback does not produce visibly weaker roles.
-_PROJECT_BULLETS = 3  # Raised from 2 because project evidence is critical for early-career ATS scores.
+_SUMMARY_WORD_LIMIT = 90
+_TOP_EXPERIENCE_BULLETS = 5
+_SECONDARY_EXPERIENCE_BULLETS = 4
+_PROJECT_BULLETS = 3
 _ACTION_REPLACEMENTS = (
     (re.compile(r"^responsible\s+for\s+", re.IGNORECASE), "Managed "),
     (re.compile(r"^worked\s+on\s+", re.IGNORECASE), "Built "),
     (re.compile(r"^helped\s+with\s+", re.IGNORECASE), "Supported "),
     (re.compile(r"^involved\s+in\s+", re.IGNORECASE), "Contributed to "),
 )
+
+# Strong action verbs for fallback bullet generation
+_FALLBACK_ACTION_VERBS = [
+    "Built", "Developed", "Implemented", "Designed", "Engineered",
+    "Delivered", "Integrated", "Optimized", "Automated", "Deployed",
+    "Refactored", "Configured", "Maintained", "Documented", "Supported",
+    "Improved", "Enhanced", "Created", "Managed", "Led",
+]
+
+# JD responsibility action templates: map responsibility keywords to action verbs
+_RESP_ACTION_MAP: dict[str, str] = {
+    "design": "Designed", "architect": "Architected", "build": "Built",
+    "develop": "Developed", "implement": "Implemented", "create": "Created",
+    "deploy": "Deployed", "maintain": "Maintained", "manage": "Managed",
+    "optimize": "Optimized", "improve": "Improved", "automate": "Automated",
+    "integrate": "Integrated", "migrate": "Migrated", "test": "Tested",
+    "monitor": "Monitored", "secure": "Secured", "scale": "Scaled",
+    "lead": "Led", "mentor": "Mentored", "collaborate": "Collaborated",
+    "document": "Documented", "analyze": "Analyzed", "evaluate": "Evaluated",
+    "configure": "Configured", "troubleshoot": "Troubleshot", "resolve": "Resolved",
+}
 
 
 def normalize_terms(text: str | None) -> set[str]:
@@ -82,9 +131,19 @@ def generate_recommendation_without_ai(
     additional_alignment_text: str | None = None,
     ats_plan: ATSKeywordPlannerOutput | None = None,
 ) -> ResumeRecommendation:
-    """Build a deterministic ResumeRecommendation without calling Gemini."""
+    """Build a deterministic ResumeRecommendation without calling Gemini.
+
+    Produces a JD-aligned resume by:
+    1. Enriching thin profiles with JD skills
+    2. Ranking experiences/projects by JD relevance
+    3. Rewriting bullets using JD vocabulary + profile facts
+    4. Building a natural summary from JD terms
+    5. Running through the full post-processing pipeline
+    """
     rejected_ids = rejected_ids or []
     locked_bullets = locked_bullets or {}
+    parsed_jd = sanitize_parsed_jd(parsed_jd)
+    locked = build_locked_fields(profile)
 
     # ── Enrich thin profile (same logic as AI path) ──────────────────────
     profile = _enrich_thin_profile_fallback(profile, parsed_jd)
@@ -102,7 +161,12 @@ def generate_recommendation_without_ai(
     skill_groups = _build_skill_groups(profile, parsed_jd, jd_terms, ats_plan)
     strongest_skills = _top_skill_names(skill_groups)
 
-    priority_keywords = _priority_keywords(parsed_jd, ats_plan, strongest_skills)
+    evidence = build_candidate_evidence(profile)
+    truth = classify_jd_keyword_truth(parsed_jd, evidence, ats_plan)
+    priority_keywords = [
+        term for term in _priority_keywords(parsed_jd, ats_plan, strongest_skills)
+        if is_supported_placement(term, truth)
+    ]
     task_themes = _task_themes(parsed_jd, ats_plan)
 
     experience_entries = []
@@ -117,6 +181,8 @@ def generate_recommendation_without_ai(
             priority_keywords=priority_keywords,
             task_themes=task_themes,
             bullet_limit=bullet_limit,
+            jd_responsibilities=[],
+            profile_context=exp,
         )
         if len(entry.bullets) >= (2 if output_index == 0 else 1):
             experience_entries.append(entry)
@@ -132,6 +198,8 @@ def generate_recommendation_without_ai(
             priority_keywords=priority_keywords,
             task_themes=task_themes,
             bullet_limit=_PROJECT_BULLETS,
+            jd_responsibilities=[],
+            profile_context=project,
         )
         if entry.bullets:
             project_entries.append(entry)
@@ -179,10 +247,10 @@ def generate_recommendation_without_ai(
         strongest_skills=strongest_skills,
         selected_experiences=[exp for exp, _, _, _ in selected_experiences],
         selected_projects=[project for project, _, _, _ in selected_projects],
-            ats_plan=ats_plan,
-            parsed_jd=parsed_jd,
-            is_fresher=is_fresher_intern_strategy(strategy),
-        )
+        ats_plan=ats_plan,
+        parsed_jd=parsed_jd,
+        is_fresher=is_fresher_intern_strategy(strategy),
+    )
 
     recommendation = ResumeRecommendation(
         generation_id=generation_id,
@@ -198,13 +266,16 @@ def generate_recommendation_without_ai(
         custom_sections=_profile_custom_sections(profile, parsed_jd),
         section_order=strategy.section_order,
         emphasis=emphasis,
-        warnings=[],
+        warnings=list(ats_plan.seniority_warnings) if ats_plan else [],
     )
+    recommendation.locked_fields = locked.model_dump(mode="json")
+    validate_locked_fields_in_output(recommendation, locked)
     gated = apply_resume_quality_gate(
         recommendation=recommendation,
         parsed_jd=parsed_jd,
         profile=profile,
         target_pages=target_pages,
+        locked=locked,
     )
     strengthened = strengthen_resume_recommendation(
         recommendation=gated,
@@ -218,7 +289,10 @@ def generate_recommendation_without_ai(
         ats_plan=ats_plan,
         target_pages=target_pages,
     )
-    return apply_resume_quality_gate(fitted, parsed_jd, profile, target_pages)
+    result = apply_resume_quality_gate(fitted, parsed_jd, profile, target_pages, locked=locked)
+    result.locked_fields = locked.model_dump(mode="json")
+    validate_locked_fields_in_output(result, locked)
+    return result
 
 
 def rank_experiences(
@@ -271,7 +345,7 @@ def build_fallback_summary(
     parsed_jd: ParsedJD | None = None,
     is_fresher: bool = False,
 ) -> str:
-    """Create a short deterministic summary using only profile and selection data."""
+    """Create a natural, JD-aligned summary using profile and JD data."""
     if is_fresher and parsed_jd:
         return _build_fresher_summary(profile, target_title, parsed_jd, ats_plan)
 
@@ -279,29 +353,49 @@ def build_fallback_summary(
     years_text = f" with {years}+ years of experience" if years and years > 0 else ""
 
     clean_title = _clean_resume_title(target_title)
+
+    # Build priority keyword list from ATS plan + strongest skills
     priority_keywords = _dedupe_strings([
         *([*ats_plan.priority_keywords, *ats_plan.must_include_skills, *ats_plan.must_include_tools_platforms] if ats_plan else []),
         *strongest_skills,
     ])[:8]
-    keyword_text = ", ".join(priority_keywords[:6])
+
+    # Build experience/project themes
     themes = _experience_themes(selected_experiences, selected_projects)
-    theme_text = ", ".join(themes[:2])
 
-    parts = [f"{clean_title}{years_text}"]
-    if keyword_text:
-        parts.append(f"skilled in {keyword_text}")
-    if theme_text:
-        parts.append(f"with background in {theme_text}")
-    if theme_text:
-        parts.append("with practical delivery across source-backed engineering work")
+    # Construct natural prose summary
+    # Sentence 1: Title + experience + top skills
+    if years_text and priority_keywords:
+        sentence1 = f"{clean_title}{years_text}, specializing in {', '.join(priority_keywords[:4])}."
+    elif priority_keywords:
+        sentence1 = f"{clean_title} skilled in {', '.join(priority_keywords[:4])}."
+    else:
+        sentence1 = f"{clean_title}{years_text}."
 
-    summary = ". ".join(part.strip(" .") for part in parts if part).strip() + "."
+    # Sentence 2: Background themes + JD alignment
+    if themes:
+        theme_text = ", ".join(themes[:2])
+        sentence2 = f"Proven background in {theme_text} with consistent delivery across engineering initiatives."
+    else:
+        sentence2 = f"Focused on delivering scalable solutions aligned with {clean_title} responsibilities."
+
+    # Sentence 3: Targeting statement with JD company
+    if parsed_jd and parsed_jd.company:
+        sentence3 = f"Targeting {parsed_jd.company} to contribute to {clean_title} objectives."
+    else:
+        sentence3 = f"Ready to drive impact in {clean_title} roles."
+
+    summary = f"{sentence1} {sentence2} {sentence3}"
     summary = _trim_words(summary, _SUMMARY_WORD_LIMIT)
+
+    # Validate: must have at least 4 meaningful terms
     if len(normalize_terms(summary)) >= 4:
         return summary
 
+    # Fallback to profile summary if available
     if profile.summary:
         return _trim_words(profile.summary.strip(), _SUMMARY_WORD_LIMIT)
+
     return _trim_words(f"{clean_title}{years_text}.", _SUMMARY_WORD_LIMIT)
 
 
@@ -313,32 +407,40 @@ def _build_fresher_summary(
 ) -> str:
     clean_title = _clean_resume_title(target_title or parsed_jd.job_title or "Developer Intern")
     degree_text = _student_positioning(profile)
-    jd_terms = _dedupe_strings([
-        "application development",
-        "automation",
-        "UI/UX",
-        "technical documentation",
-        "OOP",
-        "data modelling",
-        "unit testing",
-        *([*ats_plan.must_include_tools_platforms, *ats_plan.must_include_skills] if ats_plan else []),
-        *parsed_jd.tools_platforms,
-        *parsed_jd.domain_platform_terms,
-    ])
-    readiness_terms = [term for term in jd_terms if term.casefold() in {
-        "sharepoint", "sharepoint application building", "power pages", "power automate", "power automate flow creation"
+
+    # Build core terms from ATS plan and JD
+    core_terms = _dedupe_strings([
+        *([*ats_plan.must_include_skills, *ats_plan.must_include_tools_platforms] if ats_plan else []),
+        *parsed_jd.required_skills,
+        *parsed_jd.programming_languages,
+        *parsed_jd.frameworks[:4],
+    ])[:7]
+
+    # Separate readiness terms (tools the candidate may not have used yet)
+    readiness_terms = [term for term in core_terms if term.casefold() in {
+        "sharepoint", "sharepoint application building", "power pages", "power automate", "power automate flow creation",
     }]
-    core_terms = [term for term in jd_terms if term not in readiness_terms][:7]
-    readiness = f"; ready to learn {', '.join(readiness_terms[:3])}" if readiness_terms else ""
+    active_terms = [term for term in core_terms if term not in readiness_terms][:6]
+
+    readiness = f" Familiar with {_natural_join(readiness_terms[:3])}." if readiness_terms else ""
     achievement = _first_profile_metric(profile)
-    summary = (
-        f"{degree_text} targeting {clean_title}, with project experience in "
-        f"{', '.join(core_terms[:7])}{readiness}. "
-        f"Built and documented practical software projects using {', '.join(core_terms[:4])}, "
-        f"while applying version control, testing discipline, and recruiter-readable documentation. "
-        f"{achievement} Prepared to contribute to application development, automation workflows, "
-        f"and maintainable delivery in an entry-level engineering environment."
-    )
+
+    # Build natural prose
+    if active_terms:
+        summary = (
+            f"{degree_text} targeting {clean_title}, with hands-on project experience in "
+            f"{_natural_join(active_terms[:3])}.{readiness} "
+            f"Built and documented software projects using {_natural_join(active_terms[:2])}, "
+            f"applying version control, testing discipline, and clear technical communication. "
+            f"{achievement}Prepared to contribute to application development and maintainable delivery."
+        )
+    else:
+        summary = (
+            f"{degree_text} targeting {clean_title}.{readiness} "
+            f"Built practical software projects while applying engineering best practices. "
+            f"{achievement}Prepared to contribute to development teams."
+        )
+
     return _trim_words(summary, _SUMMARY_WORD_LIMIT)
 
 
@@ -351,8 +453,10 @@ def build_experience_entry(
     priority_keywords: list[str] | None = None,
     task_themes: list[str] | None = None,
     bullet_limit: int = _SECONDARY_EXPERIENCE_BULLETS,
+    jd_responsibilities: list[str] | None = None,
+    profile_context: WorkExperience | None = None,
 ) -> ResumeExperienceEntry:
-    """Build a deterministic experience entry using original bullets and description."""
+    """Build a deterministic experience entry with JD-aligned rewritten bullets."""
     bullets = _build_ranked_bullets(
         section_type="experience",
         source_id=exp.id,
@@ -363,6 +467,8 @@ def build_experience_entry(
         priority_keywords=priority_keywords or [],
         task_themes=task_themes or [],
         bullet_limit=bullet_limit,
+        jd_responsibilities=jd_responsibilities or [],
+        profile_context=profile_context,
     )
 
     return ResumeExperienceEntry(
@@ -387,8 +493,10 @@ def build_project_entry(
     priority_keywords: list[str] | None = None,
     task_themes: list[str] | None = None,
     bullet_limit: int = _PROJECT_BULLETS,
+    jd_responsibilities: list[str] | None = None,
+    profile_context: Project | None = None,
 ) -> ResumeProjectEntry:
-    """Build a deterministic project entry using original bullets and description."""
+    """Build a deterministic project entry with JD-aligned rewritten bullets."""
     bullets = _build_ranked_bullets(
         section_type="project",
         source_id=project.id,
@@ -399,6 +507,8 @@ def build_project_entry(
         priority_keywords=priority_keywords or [],
         task_themes=task_themes or [],
         bullet_limit=bullet_limit,
+        jd_responsibilities=jd_responsibilities or [],
+        profile_context=profile_context,
     )
 
     return ResumeProjectEntry(
@@ -408,6 +518,33 @@ def build_project_entry(
         technologies=project.technologies,
         bullets=bullets,
         relevance_score=relevance_score,
+    )
+
+
+def build_evidence_fallback_bullets(
+    *,
+    section_type: str,
+    source_id: str,
+    profile_context: WorkExperience | Project,
+    parsed_jd: ParsedJD,
+    ats_plan: ATSKeywordPlannerOutput | None = None,
+    bullet_limit: int = _PROJECT_BULLETS,
+) -> list[ResumeBullet]:
+    """Build deterministic source bullets without copying JD responsibility prose."""
+    jd_terms = _build_jd_terms(parsed_jd, None, ats_plan)
+    priority_keywords = _priority_keywords(parsed_jd, ats_plan, [])
+    return _build_ranked_bullets(
+        section_type=section_type,
+        source_id=source_id,
+        original_bullets=list(getattr(profile_context, "bullets", []) or []),
+        description=getattr(profile_context, "description", None),
+        jd_terms=jd_terms,
+        locked_bullets={},
+        priority_keywords=priority_keywords,
+        task_themes=_task_themes(parsed_jd, ats_plan),
+        bullet_limit=bullet_limit,
+        jd_responsibilities=[],
+        profile_context=profile_context,
     )
 
 
@@ -489,8 +626,24 @@ def _build_ranked_bullets(
     priority_keywords: list[str],
     task_themes: list[str],
     bullet_limit: int,
+    jd_responsibilities: list[str] | None = None,
+    profile_context: WorkExperience | Project | None = None,
 ) -> list[ResumeBullet]:
-    """Build deterministic bullets with stable IDs and exact locked-bullet preservation."""
+    """Build evidence-first bullets using profile facts + approved JD vocabulary.
+
+    Strategy:
+    1. Score original bullets against JD terms (keep the best ones)
+    2. Rewrite source descriptions when bullet evidence is sparse
+    3. Merge locked bullets first, then evidence-backed source bullets
+    """
+    jd_responsibilities = jd_responsibilities or []
+    if profile_context:
+        source_text = _build_profile_context_text(profile_context)
+        # Only keep terms that are supported by this specific context's source evidence
+        priority_keywords = [term for term in priority_keywords if contains_term(source_text, term)]
+    # Note: priority_keywords are already evidence-filtered upstream in generate_recommendation_without_ai
+
+    # ── Phase 1: Score original bullets ──────────────────────────────────
     candidates = list(original_bullets)
     if description:
         description_text = description.strip()
@@ -506,20 +659,22 @@ def _build_ranked_bullets(
     scored_candidates.sort(key=lambda item: (-item[1], item[0]))
     selected_candidates = scored_candidates[:bullet_limit]
 
-    selected_by_slot: dict[int, tuple[float, list[str], str]] = {
-        slot: (score, matches, text)
-        for slot, (_, score, matches, text) in enumerate(selected_candidates)
-    }
+    # JD responsibility prose is intentionally not bullet-generation material.
+    generated_bullets: list[tuple[str, list[str]]] = []
 
+    # ── Phase 3: Merge locked + original + generated ─────────────────────
     max_locked_slot = max(_locked_bullet_slots(section_type, source_id, locked_bullets), default=-1)
     slot_count = max(bullet_limit, len(selected_candidates), max_locked_slot + 1)
 
     bullets: list[ResumeBullet] = []
+    used_generated = 0
+
     for slot in range(slot_count):
         bullet_id = _stable_bullet_id(section_type, source_id, slot)
-        selected = selected_by_slot.get(slot)
 
+        # Locked bullets take priority
         if bullet_id in locked_bullets:
+            selected = selected_candidates[slot] if slot < len(selected_candidates) else None
             bullets.append(
                 ResumeBullet(
                     id=bullet_id,
@@ -531,37 +686,202 @@ def _build_ranked_bullets(
             )
             continue
 
-        if selected:
-            _, matches, text = selected
-        else:
-            matches = []
-            text = ""
+        # Try original bullet first
+        if slot < len(selected_candidates):
+            _, _, matches, text = selected_candidates[slot]
+            if text:
+                bullets.append(
+                    ResumeBullet(
+                        id=bullet_id,
+                        text=text,
+                        original_text=text,
+                        status=BulletStatus.PENDING,
+                        matched_keywords=_dedupe_strings([*matches, *_matched_priority_keywords(text, priority_keywords)]),
+                        source_id=source_id,
+                    )
+                )
+                continue
 
-        base_text = text or (description or "")
-        generated_text = _compose_fallback_bullet(
-            section_type=section_type,
-            source_id=source_id,
-            slot=slot,
-            base_text=base_text,
-            priority_keywords=priority_keywords,
-            task_themes=task_themes,
-        )
-        text = generated_text or text
-        if not text:
-            continue
+        # Fall back to generated bullet
+        if used_generated < len(generated_bullets):
+            gen_text, gen_matches = generated_bullets[used_generated]
+            used_generated += 1
+            if gen_text and len(gen_text) >= MIN_BULLET_LENGTH:
+                bullets.append(
+                    ResumeBullet(
+                        id=bullet_id,
+                        text=gen_text,
+                        original_text=gen_text,
+                        status=BulletStatus.PENDING,
+                        matched_keywords=_dedupe_strings([*gen_matches, *_matched_priority_keywords(gen_text, priority_keywords)]),
+                        source_id=source_id,
+                    )
+                )
+                continue
 
-        bullets.append(
-            ResumeBullet(
-                id=bullet_id,
-                text=text,
-                original_text=text,
-                status=BulletStatus.PENDING,
-                matched_keywords=_dedupe_strings([*matches, *_matched_priority_keywords(text, priority_keywords)]),
+        # Last resort: compose from base text
+        base_text = ""
+        if slot < len(selected_candidates):
+            base_text = selected_candidates[slot][3] if selected_candidates[slot][3] else (description or "")
+        if not base_text and description:
+            base_text = description
+        if base_text:
+            composed = _compose_fallback_bullet(
+                section_type=section_type,
                 source_id=source_id,
+                slot=slot,
+                base_text=base_text,
+                priority_keywords=priority_keywords,
+                task_themes=task_themes,
             )
-        )
+            if composed and len(composed) >= MIN_BULLET_LENGTH:
+                bullets.append(
+                    ResumeBullet(
+                        id=bullet_id,
+                        text=composed,
+                        original_text=composed,
+                        status=BulletStatus.PENDING,
+                        matched_keywords=_matched_priority_keywords(composed, priority_keywords),
+                        source_id=source_id,
+                    )
+                )
 
     return bullets[:bullet_limit]
+
+
+def _build_profile_context_text(profile_context: WorkExperience | Project) -> str:
+    """Build a text blob from profile context for keyword matching."""
+    parts: list[str] = []
+    if hasattr(profile_context, "title"):
+        parts.append(profile_context.title)
+    if hasattr(profile_context, "company"):
+        parts.append(profile_context.company)
+    if hasattr(profile_context, "name"):
+        parts.append(profile_context.name)
+    if hasattr(profile_context, "description") and profile_context.description:
+        parts.append(profile_context.description)
+    if hasattr(profile_context, "bullets"):
+        parts.extend(profile_context.bullets)
+    if hasattr(profile_context, "technologies"):
+        parts.extend(profile_context.technologies)
+    if hasattr(profile_context, "tags"):
+        parts.extend(getattr(profile_context, "tags", []) or [])
+    return " ".join(parts)
+
+
+def _extract_action_verb(responsibility: str) -> str:
+    """Extract the action verb from a JD responsibility sentence."""
+    lowered = responsibility.lower()
+    for term, verb in _RESP_ACTION_MAP.items():
+        if term in lowered:
+            return verb
+    # Default: use first word if it looks like a verb
+    first_word = responsibility.split()[0] if responsibility.split() else ""
+    if first_word and first_word[0].isupper() and len(first_word) > 2:
+        return first_word.rstrip("s")
+    return "Developed"
+
+
+def _build_bullet_from_responsibility(
+    action_verb: str,
+    responsibility: str,
+    matching_skills: list[str],
+    profile_context: WorkExperience | Project,
+    profile_tokens: set[str],
+) -> str:
+    """Build a single bullet from a JD responsibility + profile facts.
+
+    Formula: [Action Verb] + [what was done using JD terms] + [profile context] + [outcome]
+    """
+    # Extract key nouns/phrases from the responsibility (skip the action verb)
+    resp_lower = responsibility.lower()
+    # Remove the action verb from the responsibility to get the "what"
+    what_text = responsibility
+    for term in _RESP_ACTION_MAP:
+        if term in resp_lower:
+            what_text = re.sub(re.escape(term), "", what_text, count=1, flags=re.IGNORECASE).strip(" ,.-")
+            break
+
+    # Clean up the "what" text
+    what_text = _clean_sentence_fragment(what_text)
+    if not what_text:
+        what_text = responsibility
+
+    # Build the core bullet
+    if matching_skills:
+        skills_text = ", ".join(matching_skills[:3])
+        # Get company/project name for context
+        context_name = ""
+        if hasattr(profile_context, "company"):
+            context_name = profile_context.company
+        elif hasattr(profile_context, "name"):
+            context_name = profile_context.name
+
+        if context_name:
+            bullet = f"{action_verb} {what_text} at {context_name} leveraging {skills_text}"
+        else:
+            bullet = f"{action_verb} {what_text} leveraging {skills_text}"
+    else:
+        context_name = ""
+        if hasattr(profile_context, "company"):
+            context_name = profile_context.company
+        elif hasattr(profile_context, "name"):
+            context_name = profile_context.name
+
+        if context_name:
+            bullet = f"{action_verb} {what_text} at {context_name}"
+        else:
+            bullet = f"{action_verb} {what_text}"
+
+    # Add outcome (truthful, from profile or qualitative)
+    outcome = _extract_outcome_from_profile(profile_context, profile_tokens)
+    if outcome:
+        bullet = f"{bullet}, {outcome}"
+
+    # Ensure minimum length
+    if len(bullet) < MIN_BULLET_LENGTH:
+        # Add a truthful qualitative outcome
+        bullet = f"{bullet}, supporting team delivery and system reliability"
+
+    return _trim_bullet_text(bullet)
+
+
+def _extract_outcome_from_profile(
+    profile_context: WorkExperience | Project,
+    profile_tokens: set[str],
+) -> str:
+    """Extract a truthful outcome from profile content."""
+    profile_text = _build_profile_context_text(profile_context)
+    profile_lower = profile_text.lower()
+
+    # Look for metrics in profile
+    metric_match = re.search(r"(\d+(?:\.\d+)?%|\d+\+|\d+\s*(users|clients|requests|ms|mb|gb|tb|apis|services|endpoints))", profile_lower)
+    if metric_match:
+        metric = metric_match.group(0)
+        # Determine the type of outcome
+        if "%" in metric:
+            return f"improving performance by {metric}"
+        elif "users" in metric or "clients" in metric:
+            return f"supporting {metric}"
+        elif "requests" in metric or "apis" in metric or "endpoints" in metric:
+            return f"handling {metric} with high availability"
+        else:
+            return f"delivering {metric} in production"
+
+    # Look for qualitative outcomes from profile text
+    if any(term in profile_lower for term in ("automat", "ci/cd", "pipeline", "deploy")):
+        return "streamlining deployment and release processes"
+    if any(term in profile_lower for term in ("test", "quality", "bug", "defect")):
+        return "improving code quality and test coverage"
+    if any(term in profile_lower for term in ("document", "spec", "design")):
+        return "strengthening documentation and design standards"
+    if any(term in profile_lower for term in ("monitor", "observ", "log", "alert")):
+        return "enhancing system observability and reliability"
+    if any(term in profile_lower for term in ("refactor", "migrate", "moderniz")):
+        return "improving maintainability and reducing technical debt"
+
+    # Default truthful qualitative outcome
+    return "supporting release readiness and team delivery goals"
 
 
 def _compose_fallback_bullet(
@@ -572,25 +892,47 @@ def _compose_fallback_bullet(
     priority_keywords: list[str],
     task_themes: list[str],
 ) -> str:
-    """Lightly clean a profile bullet without inventing JD-specific claims."""
+    """Clean and enhance a profile bullet with JD-aligned vocabulary."""
     cleaned_base = _clean_sentence_fragment(base_text)
     if not cleaned_base:
         return ""
+
+    # Replace weak openings
     for pattern, replacement in _ACTION_REPLACEMENTS:
         cleaned_base = pattern.sub(replacement, cleaned_base, count=1)
+
+    # Ensure action verb opening
     first = cleaned_base.split()[0].casefold().strip(",.:;") if cleaned_base.split() else ""
-    if first not in {verb.casefold() for verb in ("Built", "Implemented", "Delivered", "Engineered", "Optimized", "Integrated", "Managed", "Mentored", "Supported", "Contributed", "Developed", "Created", "Led", "Improved", "Maintained", "Processed", "Documented")}:
+    strong_verbs = {verb.casefold() for verb in ("Built", "Implemented", "Delivered", "Engineered", "Optimized", "Integrated", "Managed", "Mentored", "Supported", "Contributed", "Developed", "Created", "Led", "Improved", "Maintained", "Processed", "Documented", "Designed", "Deployed", "Automated", "Configured")}
+    if first not in strong_verbs:
         cleaned_base = f"Delivered {cleaned_base[0].lower() + cleaned_base[1:] if len(cleaned_base) > 1 else cleaned_base}"
-    if len(cleaned_base) < 80:
-        # Fallback bullets must still clear the quality gate, so enrich terse
-        # source fragments with source-backed context instead of letting them drop.
+
+    # Enrich short bullets with JD context
+    if len(cleaned_base) < MIN_BULLET_LENGTH:
         keyword = _select_keyword(priority_keywords, slot)
         task = _select_task(task_themes, base_text, slot)
-        suffix = f" using {keyword}" if keyword else " using source-backed technical skills"
+        if keyword:
+            cleaned_base = f"{cleaned_base} using {keyword}"
         if task and task.casefold() not in cleaned_base.casefold():
-            suffix += f" for {task}"
-        cleaned_base = f"{cleaned_base}{suffix}, preserving measurable project evidence"
-    return _trim_bullet_text(cleaned_base)
+            cleaned_base = f"{cleaned_base} to support {task}"
+        if len(cleaned_base) < MIN_BULLET_LENGTH:
+            cleaned_base = f"{cleaned_base}, supporting team delivery and system reliability"
+
+    result = _trim_bullet_text(cleaned_base)
+
+    # Final quality check: ensure no dangling ending or JD boilerplate
+    if is_dangling_ending(result):
+        # Try to repair
+        quality = validate_single_bullet(result)
+        if quality.repaired and quality.text and word_count(quality.text) >= 5:
+            result = quality.text
+        else:
+            return ""  # Cannot use this bullet
+
+    if has_jd_boilerplate(result):
+        return ""  # Cannot use this bullet
+
+    return result
 
 
 def _preservation_score(text: str) -> float:
@@ -625,13 +967,23 @@ def _priority_keywords(
 
 
 def _task_themes(parsed_jd: ParsedJD, ats_plan: ATSKeywordPlannerOutput | None) -> list[str]:
-    values: list[str] = []
-    if ats_plan:
-        values.extend(ats_plan.must_include_responsibilities)
-        values.extend(ats_plan.suggested_project_emphasis)
-    values.extend(parsed_jd.responsibilities)
-    values.extend(req.text for req in parsed_jd.requirements if req.is_required)
-    return [value for value in _dedupe_strings(values) if 4 <= len(value) <= 90][:12]
+    values = [
+        *parsed_jd.responsibilities,
+        *[req.text for req in parsed_jd.requirements if req.is_required],
+        *([*ats_plan.must_include_responsibilities] if ats_plan else []),
+    ]
+    themes = [_abstract_task_theme(value) for value in values]
+    return [value for value in _dedupe_strings(themes) if value][:12]
+
+
+def _abstract_task_theme(value: str) -> str:
+    tokens = [
+        token.casefold()
+        for token in re.findall(r"[A-Za-z0-9+#./-]{3,}", value)
+        if token.casefold() not in _STOPWORDS
+        and token.casefold() not in {"responsibilities", "include", "seeking", "ideal", "candidate"}
+    ]
+    return " ".join(tokens[:4])
 
 
 def _select_keyword(priority_keywords: list[str], slot: int) -> str:
@@ -677,94 +1029,13 @@ def _build_skill_groups(
 ) -> list[ResumeSkillGroup]:
     """Build ATS-friendly skill groups with JD-required skills first."""
     return build_skill_taxonomy([], parsed_jd, profile, target_pages=1)
-    profile_skills = [skill.name for skill in profile.skills]
-    category_values: dict[str, list[str]] = {
-        "Languages": [*parsed_jd.programming_languages],
-        "Frameworks": [*parsed_jd.frameworks],
-        "Databases": [*parsed_jd.databases],
-        "Cloud/DevOps": [*parsed_jd.cloud_devops_tools],
-        "Domain/Platforms": [*parsed_jd.domain_platform_terms, *parsed_jd.mobile_platform_terms],
-        "Tools": [*parsed_jd.tools_platforms, *parsed_jd.deployment_environment_terms],
-    }
-
-    for skill in profile.skills:
-        category = _canonical_skill_category(skill.category, skill.name)
-        category_values.setdefault(category, []).append(skill.name)
-
-    if ats_plan:
-        planned_skills = [*ats_plan.must_include_skills, *ats_plan.must_include_tools_platforms]
-    else:
-        planned_skills = [*parsed_jd.required_skills, *parsed_jd.preferred_skills]
-
-    uncategorized_required: list[str] = []
-    for value in _dedupe_strings([*parsed_jd.required_skills, *planned_skills, *parsed_jd.preferred_skills]):
-        category = _infer_skill_category(value, category_values)
-        if category:
-            category_values.setdefault(category, []).insert(0, value)
-        else:
-            uncategorized_required.append(value)
-
-    if uncategorized_required:
-        category_values.setdefault("Tools", []).extend(uncategorized_required)
-
-    ordered_categories = ["Languages", "Frameworks", "Databases", "Cloud/DevOps", "Domain/Platforms", "Tools"]
-    groups: list[ResumeSkillGroup] = []
-    for category in ordered_categories:
-        values = category_values.get(category, [])
-        ordered = _order_skills(values, planned_skills, profile_skills, jd_terms)
-        if ordered:
-            groups.append(ResumeSkillGroup(category=category, skills=ordered[:10]))
-    return groups
-
-
-def _canonical_skill_category(category: str | None, skill_name: str) -> str:
-    text = f"{category or ''} {skill_name}".casefold()
-    if any(term in text for term in ("language", "java", "python", "javascript", "typescript", "pl/sql", "sql")):
-        if "sql" == skill_name.casefold() or "database" in text:
-            return "Databases"
-        return "Languages"
-    if any(term in text for term in ("framework", "react", "fastapi", "spring", "django", "node")):
-        return "Frameworks"
-    if any(term in text for term in ("database", "postgres", "mysql", "oracle", "mongodb", "redis")):
-        return "Databases"
-    if any(term in text for term in ("cloud", "devops", "aws", "azure", "gcp", "docker", "kubernetes", "jenkins", "git")):
-        return "Cloud/DevOps"
-    if any(term in text for term in ("platform", "domain", "obdx", "banking", "android", "ios", "mobile")):
-        return "Domain/Platforms"
-    return "Tools"
-
-
-def _infer_skill_category(value: str, category_values: dict[str, list[str]]) -> str | None:
-    normalized = value.casefold()
-    for category, values in category_values.items():
-        if any(normalized == existing.casefold() for existing in values):
-            return category
-    return _canonical_skill_category(None, value)
-
-
-def _order_skills(
-    values: list[str],
-    planned_skills: list[str],
-    profile_skills: list[str],
-    jd_terms: set[str],
-) -> list[str]:
-    planned = {value.casefold() for value in planned_skills}
-    profile = {value.casefold() for value in profile_skills}
-    deduped = _dedupe_strings(values)
-    return sorted(
-        deduped,
-        key=lambda value: (
-            value.casefold() not in planned,
-            value.casefold() not in profile,
-            -score_text_against_jd(value, jd_terms)[0],
-            value.casefold(),
-        ),
-    )
 
 
 def _top_skill_names(skill_groups: list[ResumeSkillGroup]) -> list[str]:
     names: list[str] = []
     for group in skill_groups:
+        if group.category.casefold() == "learning focus":
+            continue
         for skill in group.skills:
             if skill not in names:
                 names.append(skill)
@@ -784,6 +1055,17 @@ def _dedupe_strings(values: list[str]) -> list[str]:
         seen.add(key)
         deduped.append(cleaned)
     return deduped
+
+
+def _natural_join(values: list[str]) -> str:
+    cleaned = _dedupe_strings([value for value in values if value])
+    if not cleaned:
+        return ""
+    if len(cleaned) == 1:
+        return cleaned[0]
+    if len(cleaned) == 2:
+        return f"{cleaned[0]} and {cleaned[1]}"
+    return f"{cleaned[0]}, {cleaned[1]}, and {cleaned[2]}"
 
 
 def _experience_themes(
@@ -980,20 +1262,6 @@ def _enrich_thin_profile_fallback(profile: MasterProfile, parsed_jd: ParsedJD) -
             if tech.strip() and tech.casefold() not in existing_names:
                 enriched_skills.append(Skill(name=tech.strip()))
                 existing_names.add(tech.casefold())
-
-    jd_inject = [
-        *parsed_jd.required_skills,
-        *parsed_jd.programming_languages,
-        *parsed_jd.frameworks[:8],
-        *parsed_jd.databases[:6],
-        *parsed_jd.tools_platforms[:8],
-        *parsed_jd.cloud_devops_tools[:8],
-    ]
-    for name in jd_inject:
-        clean = name.strip()
-        if clean and clean.casefold() not in existing_names:
-            enriched_skills.append(Skill(name=clean))
-            existing_names.add(clean.casefold())
 
     if len(enriched_skills) != len(profile.skills):
         updates["skills"] = enriched_skills

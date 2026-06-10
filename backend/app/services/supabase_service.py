@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from functools import lru_cache
 import logging
+import re
 from typing import Any
 from uuid import UUID
 
@@ -20,12 +21,15 @@ from app.schemas.supabase import (
     ResumeGenerationRecord,
     ResumeGenerationUpdate,
     SettingsUpdateRequest,
+    SourceResumeCreate,
+    SourceResumeRecord,
     UsageEventRecord,
     UserProfileRecord,
     UserSettingsRecord,
 )
 
 logger = logging.getLogger(__name__)
+_WARNED_MISSING_RELATIONS: set[str] = set()
 
 
 class SupabaseServiceError(RuntimeError):
@@ -90,6 +94,156 @@ class SupabaseService:
             raise SupabaseDatabaseError("Failed to update Supabase profile")
         return UserProfileRecord.model_validate(updated)
 
+    def replace_profile_embeddings(
+        self,
+        user_id: UUID | str,
+        rows: list[dict[str, Any]],
+    ) -> int:
+        """Replace all profile embedding rows for a user."""
+        user_id_str = _uuid_str(user_id)
+        try:
+            self._delete_many("profile_embeddings", filters={"user_id": user_id_str})
+        except SupabaseDatabaseError as exc:
+            if "profile_embeddings" in str(exc):
+                _warn_missing_relation_once(
+                    "profile_embeddings",
+                    "profile_embeddings is unavailable; skipping embedding persistence",
+                )
+                return 0
+            raise
+        if not rows:
+            return 0
+        prepared_rows = [dict(row, user_id=user_id_str) for row in rows]
+        try:
+            return len(self._insert_many("profile_embeddings", prepared_rows))
+        except SupabaseDatabaseError as exc:
+            if "profile_embeddings" in str(exc):
+                _warn_missing_relation_once(
+                    "profile_embeddings",
+                    "profile_embeddings is unavailable; skipping embedding persistence",
+                )
+                return 0
+            raise
+
+    def count_profile_embeddings(self, user_id: UUID | str) -> int:
+        """Return the number of stored embedding chunks for a user."""
+        try:
+            response = self._client.get(
+                self._table_url("profile_embeddings"),
+                params={
+                    "select": "id",
+                    "user_id": f"eq.{_uuid_str(user_id)}",
+                },
+            )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            if _missing_schema_relation(exc.response, "profile_embeddings"):
+                _warn_missing_relation_once(
+                    "profile_embeddings",
+                    "profile_embeddings table is unavailable; RAG will use fallback",
+                )
+                return 0
+            logger.exception("Supabase count_profile_embeddings failed")
+            raise SupabaseDatabaseError("Failed to count profile embeddings") from exc
+        except Exception as exc:
+            logger.exception("Supabase count_profile_embeddings failed")
+            raise SupabaseDatabaseError("Failed to count profile embeddings") from exc
+        rows = response.json()
+        return len(rows) if isinstance(rows, list) else 0
+
+    def match_profile_chunks(
+        self,
+        *,
+        user_id: UUID | str,
+        query_embedding: list[float],
+        match_count: int = 3,
+        similarity_threshold: float = 0.55,
+    ) -> list[dict[str, Any]]:
+        """Run the pgvector match_profile_chunks RPC for a user's profile chunks."""
+        try:
+            response = self._client.post(
+                f"{self._rest_url}/rpc/match_profile_chunks",
+                json={
+                    "query_embedding": query_embedding,
+                    "match_user_id": _uuid_str(user_id),
+                    "match_count": match_count,
+                    "similarity_threshold": similarity_threshold,
+                },
+            )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            if _missing_schema_relation(exc.response, "match_profile_chunks"):
+                _warn_missing_relation_once(
+                    "match_profile_chunks",
+                    "match_profile_chunks RPC is unavailable; RAG will use fallback",
+                )
+                return []
+            logger.exception("Supabase match_profile_chunks failed")
+            raise SupabaseDatabaseError("Failed to match profile chunks") from exc
+        except Exception as exc:
+            logger.exception("Supabase match_profile_chunks failed")
+            raise SupabaseDatabaseError("Failed to match profile chunks") from exc
+        rows = response.json()
+        return rows if isinstance(rows, list) else []
+
+    def create_source_resume(
+        self,
+        user_id: UUID | str,
+        data: SourceResumeCreate | dict[str, Any],
+    ) -> SourceResumeRecord:
+        user_id_str = _uuid_str(user_id)
+        self._update_many(
+            "source_resumes",
+            {"is_active": False},
+            filters={"user_id": user_id_str, "is_active": True, "status": "active"},
+        )
+        payload = _model_payload(data)
+        payload.update({"user_id": user_id_str, "is_active": True, "status": "active"})
+        return SourceResumeRecord.model_validate(self._insert_single("source_resumes", payload))
+
+    def list_source_resumes(self, user_id: UUID | str) -> list[SourceResumeRecord]:
+        try:
+            response = self._client.get(
+                self._table_url("source_resumes"),
+                params={
+                    "select": "*",
+                    "user_id": f"eq.{_uuid_str(user_id)}",
+                    "status": "eq.active",
+                    "order": "created_at.desc",
+                },
+            )
+            response.raise_for_status()
+        except Exception as exc:
+            logger.exception("Supabase list_source_resumes failed")
+            raise SupabaseDatabaseError("Failed to list Supabase source resumes") from exc
+        return [SourceResumeRecord.model_validate(row) for row in response.json()]
+
+    def activate_source_resume(
+        self,
+        user_id: UUID | str,
+        source_resume_id: UUID | str,
+    ) -> SourceResumeRecord:
+        user_id_str = _uuid_str(user_id)
+        target = self._select_maybe_single(
+            "source_resumes",
+            filters={"id": _uuid_str(source_resume_id), "user_id": user_id_str, "status": "active"},
+        )
+        if target is None:
+            raise SupabaseDatabaseError("Source resume not found")
+        self._update_many(
+            "source_resumes",
+            {"is_active": False},
+            filters={"user_id": user_id_str, "is_active": True, "status": "active"},
+        )
+        updated = self._update_single(
+            "source_resumes",
+            {"is_active": True},
+            filters={"id": _uuid_str(source_resume_id), "user_id": user_id_str},
+        )
+        if updated is None:
+            raise SupabaseDatabaseError("Failed to activate source resume")
+        return SourceResumeRecord.model_validate(updated)
+
     def create_generation(
         self,
         user_id: UUID | str,
@@ -106,7 +260,20 @@ class SupabaseService:
             if profile is None:
                 raise SupabaseDatabaseError("Profile not found for generation owner")
         payload["user_id"] = user_id_str
-        created = self._insert_single("resume_generations", payload)
+        
+        try:
+            created = self._insert_single("resume_generations", payload)
+        except SupabaseDatabaseError as exc:
+            if "409" in str(exc) or "Conflict" in str(exc):
+                # Workaround for missing auth trigger: ensure user exists in public.users
+                try:
+                    self._insert_single("users", {"id": user_id_str})
+                except Exception:
+                    pass
+                created = self._insert_single("resume_generations", payload)
+            else:
+                raise
+                
         return ResumeGenerationRecord.model_validate(created)
 
     def update_generation(
@@ -135,6 +302,37 @@ class SupabaseService:
         )
         return ResumeGenerationRecord.model_validate(row) if row else None
 
+    def list_generations_by_status(
+        self,
+        status: str,
+        *,
+        older_than: datetime | None = None,
+        limit: int = 50,
+    ) -> list[ResumeGenerationRecord]:
+        """List generations by status, optionally filtered by updated_at < older_than.
+
+        INTERNAL/ADMIN USE ONLY — no owner scoping.
+        Used by the stale generation sweeper.
+        """
+        params: dict[str, str] = {
+            "select": "*",
+            "status": f"eq.{status}",
+            "order": "updated_at.asc",
+            "limit": str(limit),
+        }
+        if older_than is not None:
+            params["updated_at"] = f"lt.{older_than.isoformat()}"
+        try:
+            response = self._client.get(
+                self._table_url("resume_generations"),
+                params=params,
+            )
+            response.raise_for_status()
+        except Exception as exc:
+            logger.exception("Supabase list_generations_by_status failed")
+            raise SupabaseDatabaseError("Failed to list generations by status") from exc
+        return [ResumeGenerationRecord.model_validate(row) for row in response.json()]
+
     def list_generations(
         self,
         user_id: UUID | str,
@@ -158,6 +356,48 @@ class SupabaseService:
             raise SupabaseDatabaseError("Failed to list Supabase generations") from exc
 
         return [ResumeGenerationRecord.model_validate(row) for row in response.json()]
+
+    def count_generations_for_user_since(
+        self,
+        user_id: UUID | str,
+        since: datetime,
+    ) -> int:
+        """Count a user's generations created after a cutoff."""
+        try:
+            response = self._client.get(
+                self._table_url("resume_generations"),
+                params={
+                    "select": "id",
+                    "user_id": f"eq.{_uuid_str(user_id)}",
+                    "created_at": f"gte.{since.isoformat()}",
+                    "limit": 1000,
+                },
+            )
+            response.raise_for_status()
+        except Exception as exc:
+            logger.exception("Supabase count_generations_for_user_since failed")
+            raise SupabaseDatabaseError("Failed to count Supabase generations") from exc
+        rows = response.json()
+        return len(rows) if isinstance(rows, list) else 0
+
+    def count_active_generations_for_user(self, user_id: UUID | str) -> int:
+        """Count a user's queued/running generations."""
+        try:
+            response = self._client.get(
+                self._table_url("resume_generations"),
+                params={
+                    "select": "id",
+                    "user_id": f"eq.{_uuid_str(user_id)}",
+                    "status": "in.(queued,running)",
+                    "limit": 1000,
+                },
+            )
+            response.raise_for_status()
+        except Exception as exc:
+            logger.exception("Supabase count_active_generations_for_user failed")
+            raise SupabaseDatabaseError("Failed to count active Supabase generations") from exc
+        rows = response.json()
+        return len(rows) if isinstance(rows, list) else 0
 
     def create_file_record(
         self,
@@ -245,6 +485,7 @@ class SupabaseService:
                 "user_id": user_id_str,
                 "target_resume_pages": 1,
                 "preferred_tone": "professional",
+                "aggressive_ats_default": False,
             },
         )
         return UserSettingsRecord.model_validate(created)
@@ -321,14 +562,52 @@ class SupabaseService:
         return rows[0] if rows else None
 
     def _insert_single(self, table: str, payload: dict[str, Any]) -> dict[str, Any]:
-        try:
-            response = self._client.post(self._table_url(table), json=payload)
-            response.raise_for_status()
-        except Exception as exc:
-            logger.exception("Supabase insert failed table=%s", table)
-            raise SupabaseDatabaseError(f"Failed to insert Supabase table {table}") from exc
+        working_payload = dict(payload)
+        while True:
+            try:
+                response = self._client.post(self._table_url(table), json=working_payload)
+                response.raise_for_status()
+                break
+            except httpx.HTTPStatusError as exc:
+                missing_column = _missing_schema_column(exc.response)
+                if missing_column and missing_column in working_payload:
+                    logger.warning(
+                        "Supabase table=%s schema cache is missing column=%s; retrying without it",
+                        table,
+                        missing_column,
+                    )
+                    working_payload.pop(missing_column, None)
+                    continue
+                logger.exception(
+                    "Supabase insert failed table=%s status=%s body=%s",
+                    table,
+                    exc.response.status_code,
+                    exc.response.text,
+                )
+                raise SupabaseDatabaseError(f"Failed to insert Supabase table {table}") from exc
+            except Exception as exc:
+                logger.exception("Supabase insert failed table=%s", table)
+                raise SupabaseDatabaseError(f"Failed to insert Supabase table {table}") from exc
 
         return _single_response_row(response.json(), table)
+
+    def _insert_many(self, table: str, payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not payloads:
+            return []
+        try:
+            response = self._client.post(self._table_url(table), json=payloads)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            if _missing_schema_relation(exc.response, table):
+                _warn_missing_relation_once(table, f"Supabase relation unavailable table={table}")
+                raise SupabaseDatabaseError(f"Supabase relation unavailable table={table}") from exc
+            logger.exception("Supabase bulk insert failed table=%s", table)
+            raise SupabaseDatabaseError(f"Failed to bulk insert Supabase table {table}") from exc
+        except Exception as exc:
+            logger.exception("Supabase bulk insert failed table=%s", table)
+            raise SupabaseDatabaseError(f"Failed to bulk insert Supabase table {table}") from exc
+        rows = response.json()
+        return rows if isinstance(rows, list) else []
 
     def _upsert_single(
         self,
@@ -336,17 +615,37 @@ class SupabaseService:
         payload: dict[str, Any],
         on_conflict: str,
     ) -> dict[str, Any]:
-        try:
-            response = self._client.post(
-                self._table_url(table),
-                params={"on_conflict": on_conflict},
-                headers={"Prefer": "resolution=merge-duplicates,return=representation"},
-                json=payload,
-            )
-            response.raise_for_status()
-        except Exception as exc:
-            logger.exception("Supabase upsert failed table=%s", table)
-            raise SupabaseDatabaseError(f"Failed to upsert Supabase table {table}") from exc
+        working_payload = dict(payload)
+        while True:
+            try:
+                response = self._client.post(
+                    self._table_url(table),
+                    params={"on_conflict": on_conflict},
+                    headers={"Prefer": "resolution=merge-duplicates,return=representation"},
+                    json=working_payload,
+                )
+                response.raise_for_status()
+                break
+            except httpx.HTTPStatusError as exc:
+                missing_column = _missing_schema_column(exc.response)
+                if missing_column and missing_column in working_payload:
+                    logger.warning(
+                        "Supabase table=%s schema cache is missing column=%s; retrying without it",
+                        table,
+                        missing_column,
+                    )
+                    working_payload.pop(missing_column, None)
+                    continue
+                logger.exception(
+                    "Supabase upsert failed table=%s status=%s body=%s",
+                    table,
+                    exc.response.status_code,
+                    exc.response.text,
+                )
+                raise SupabaseDatabaseError(f"Failed to upsert Supabase table {table}") from exc
+            except Exception as exc:
+                logger.exception("Supabase upsert failed table=%s", table)
+                raise SupabaseDatabaseError(f"Failed to upsert Supabase table {table}") from exc
 
         return _single_response_row(response.json(), table)
 
@@ -356,9 +655,51 @@ class SupabaseService:
         payload: dict[str, Any],
         filters: dict[str, Any],
     ) -> dict[str, Any] | None:
-        if not payload:
+        working_payload = dict(payload)
+        if not working_payload:
             return self._select_maybe_single(table, filters)
 
+        while True:
+            try:
+                response = self._client.patch(
+                    self._table_url(table),
+                    params=_filter_params(filters),
+                    json=working_payload,
+                )
+                response.raise_for_status()
+                break
+            except httpx.HTTPStatusError as exc:
+                missing_column = _missing_schema_column(exc.response)
+                if missing_column and missing_column in working_payload:
+                    logger.warning(
+                        "Supabase table=%s schema cache is missing column=%s; retrying without it",
+                        table,
+                        missing_column,
+                    )
+                    working_payload.pop(missing_column, None)
+                    if not working_payload:
+                        return self._select_maybe_single(table, filters)
+                    continue
+                logger.exception(
+                    "Supabase update failed table=%s status=%s body=%s",
+                    table,
+                    exc.response.status_code,
+                    exc.response.text,
+                )
+                raise SupabaseDatabaseError(f"Failed to update Supabase table {table}") from exc
+            except Exception as exc:
+                logger.exception("Supabase update failed table=%s", table)
+                raise SupabaseDatabaseError(f"Failed to update Supabase table {table}") from exc
+
+        rows = response.json()
+        return rows[0] if rows else None
+
+    def _update_many(
+        self,
+        table: str,
+        payload: dict[str, Any],
+        filters: dict[str, Any],
+    ) -> list[dict[str, Any]]:
         try:
             response = self._client.patch(
                 self._table_url(table),
@@ -367,11 +708,33 @@ class SupabaseService:
             )
             response.raise_for_status()
         except Exception as exc:
-            logger.exception("Supabase update failed table=%s", table)
+            logger.exception("Supabase bulk update failed table=%s", table)
             raise SupabaseDatabaseError(f"Failed to update Supabase table {table}") from exc
-
         rows = response.json()
-        return rows[0] if rows else None
+        return rows if isinstance(rows, list) else []
+
+    def _delete_many(
+        self,
+        table: str,
+        filters: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        try:
+            response = self._client.delete(
+                self._table_url(table),
+                params=_filter_params(filters),
+            )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            if _missing_schema_relation(exc.response, table):
+                _warn_missing_relation_once(table, f"Supabase relation unavailable table={table}")
+                raise SupabaseDatabaseError(f"Supabase relation unavailable table={table}") from exc
+            logger.exception("Supabase delete failed table=%s", table)
+            raise SupabaseDatabaseError(f"Failed to delete Supabase table {table}") from exc
+        except Exception as exc:
+            logger.exception("Supabase delete failed table=%s", table)
+            raise SupabaseDatabaseError(f"Failed to delete Supabase table {table}") from exc
+        rows = response.json()
+        return rows if isinstance(rows, list) else []
 
     def _table_url(self, table: str) -> str:
         return f"{self._rest_url}/{table}"
@@ -393,6 +756,40 @@ def _model_payload(data: Any) -> dict[str, Any]:
     if hasattr(data, "model_dump"):
         return data.model_dump(mode="json", exclude_none=True)
     return {key: value for key, value in dict(data).items() if value is not None}
+
+
+def _missing_schema_column(response: httpx.Response) -> str | None:
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    if body.get("code") != "PGRST204":
+        return None
+    message = body.get("message") or ""
+    match = re.search(r"Could not find the '([^']+)' column", message)
+    return match.group(1) if match else None
+
+
+def _missing_schema_relation(response: httpx.Response, relation: str) -> bool:
+    if response.status_code != 404:
+        return False
+    try:
+        body = response.json()
+    except ValueError:
+        return relation in response.text
+    message = " ".join(str(body.get(key) or "") for key in ("code", "message", "details", "hint"))
+    return relation in message and (
+        "Could not find" in message
+        or "schema cache" in message
+        or "PGRST" in message
+    )
+
+
+def _warn_missing_relation_once(relation: str, message: str) -> None:
+    if relation in _WARNED_MISSING_RELATIONS:
+        return
+    _WARNED_MISSING_RELATIONS.add(relation)
+    logger.warning("%s", message)
 
 
 def _filter_params(filters: dict[str, Any]) -> dict[str, str]:

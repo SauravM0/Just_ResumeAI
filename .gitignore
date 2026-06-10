@@ -81,3 +81,32 @@ frontend/*.local
 /scratch/
 /models_list.txt
 /.codex
+
+# IDE and editor swap/backup files
+*.swp
+*.swo
+*~
+*.bak
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Package manager lockfiles (keep frontend/package-lock.json, ignore others)
+backend/package-lock.json
+backend/yarn.lock
+backend/pnpm-lock.yaml
+
+# Debug and profiling
+*.prof
+*.trace
+.flamegraph/
+
+# Local SQLite databases (not in output/)
+*.db
+*.sqlite
+
+# Windows reserved files accidentally created
+nul
+**/nul

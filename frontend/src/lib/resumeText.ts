@@ -1,4 +1,5 @@
 import type { ResumeBullet, ResumeRecommendation } from '../types/resume';
+import { objectArray, stringArray } from './resumeSafe';
 
 function clean(value: string | undefined | null): string {
   return (value || '').trim();
@@ -8,8 +9,8 @@ function joinPresent(values: Array<string | undefined | null>, separator = ' | '
   return values.map(clean).filter(Boolean).join(separator);
 }
 
-function includedBullets(bullets: ResumeBullet[]): ResumeBullet[] {
-  return bullets.filter((bullet) => bullet.status !== 'rejected' && clean(bullet.text));
+function includedBullets(bullets: unknown): ResumeBullet[] {
+  return objectArray<ResumeBullet>(bullets).filter((bullet) => bullet.status !== 'rejected' && clean(bullet.text));
 }
 
 function section(title: string, lines: string[]): string[] {
@@ -17,14 +18,54 @@ function section(title: string, lines: string[]): string[] {
   return body.length ? [title, ...body] : [];
 }
 
+const FORBIDDEN_RESUME_PHRASES = [
+  'Invalid Job Description Content',
+  'Job Description Content',
+  'We are seeking',
+  'The ideal candidate',
+  'Apply now',
+  'ATS Keywords',
+  'Responsibilities include',
+  'Equal opportunity employer',
+];
+
+type TextEntry = {
+  included?: boolean;
+  title?: string;
+  name?: string;
+  company?: string;
+  institution?: string;
+  degree?: string;
+  start_date?: string;
+  end_date?: string;
+  issuing_org?: string;
+  issuer?: string;
+  date?: string;
+  description?: string;
+  technologies?: unknown;
+  bullets?: unknown;
+  items?: unknown;
+};
+
+function blockContaminatedResumeText(value: string): string {
+  const lowered = value.toLowerCase();
+  return FORBIDDEN_RESUME_PHRASES.some((phrase) => lowered.includes(phrase.toLowerCase()))
+    ? ''
+    : value;
+}
+
 export function recommendationSummaryToText(recommendation: ResumeRecommendation): string {
   return clean(recommendation.summary);
 }
 
 export function recommendationSkillsToText(recommendation: ResumeRecommendation): string {
-  return recommendation.skills
-    .filter((group) => group.skills.length > 0)
-    .map((group) => `${group.category}: ${group.skills.map(clean).filter(Boolean).join(', ')}`)
+  return objectArray<{ category?: string; skills?: unknown }>(recommendation.skills)
+    .map((group) => ({
+      category: clean(group.category),
+      skills: stringArray(group.skills).map(clean).filter(Boolean),
+    }))
+    .filter((group) => group.category && group.skills.length > 0)
+    .map((group) => `${group.category}: ${group.skills.join(', ')}`)
     .filter(Boolean)
     .join('\n');
 }
@@ -52,7 +93,7 @@ export function recommendationToPlainText(recommendation: ResumeRecommendation):
   blocks.push(...section('SUMMARY', [recommendationSummaryToText(recommendation)]));
   blocks.push(...section('TECHNICAL SKILLS', [recommendationSkillsToText(recommendation)]));
 
-  const experienceLines = recommendation.experience
+  const experienceLines = objectArray<TextEntry>(recommendation.experience)
     .filter((entry) => entry.included)
     .flatMap((entry) => {
       const heading = `${entry.title} — ${entry.company} | ${entry.start_date} - ${entry.end_date || 'Present'}`;
@@ -63,10 +104,10 @@ export function recommendationToPlainText(recommendation: ResumeRecommendation):
     });
   blocks.push(...section('EXPERIENCE', experienceLines));
 
-  const projectLines = recommendation.projects
+  const projectLines = objectArray<TextEntry>(recommendation.projects)
     .filter((entry) => entry.included)
     .flatMap((entry) => {
-      const heading = joinPresent([entry.name, entry.technologies.join(', ')]);
+      const heading = joinPresent([entry.name, stringArray(entry.technologies).join(', ')]);
       return [
         heading,
         ...includedBullets(entry.bullets).map((bullet) => `- ${bullet.text}`),
@@ -74,26 +115,26 @@ export function recommendationToPlainText(recommendation: ResumeRecommendation):
     });
   blocks.push(...section('PROJECTS', projectLines));
 
-  const educationLines = recommendation.education
+  const educationLines = objectArray<TextEntry>(recommendation.education)
     .filter((entry) => entry.included)
     .map((entry) => joinPresent([entry.degree, entry.institution], ', '));
   blocks.push(...section('EDUCATION', educationLines));
 
-  const certificationLines = recommendation.certifications
+  const certificationLines = objectArray<TextEntry>(recommendation.certifications)
     .filter((entry) => entry.included)
     .map((entry) => joinPresent([entry.name, entry.issuing_org, entry.date]));
   blocks.push(...section('CERTIFICATIONS', certificationLines));
 
-  const achievementLines = [...(recommendation.achievements ?? []), ...(recommendation.awards ?? [])]
+  const achievementLines = [...objectArray<TextEntry>(recommendation.achievements), ...objectArray<TextEntry>(recommendation.awards)]
     .filter((entry) => entry.included)
     .map((entry) => joinPresent([entry.title, entry.issuer, entry.date, entry.description]));
   blocks.push(...section('ACHIEVEMENTS', achievementLines));
 
-  (recommendation.custom_sections ?? [])
-    .filter((entry) => entry.included && entry.items.length)
-    .forEach((entry) => blocks.push(...section(entry.title.toUpperCase(), entry.items)));
+  objectArray<TextEntry>(recommendation.custom_sections)
+    .filter((entry) => entry.included && stringArray(entry.items).length)
+    .forEach((entry) => blocks.push(...section((entry.title || '').toUpperCase(), stringArray(entry.items))));
 
-  return blocks.filter(Boolean).join('\n\n');
+  return blockContaminatedResumeText(blocks.filter(Boolean).join('\n\n'));
 }
 
 export function recommendationToMarkdown(recommendation: ResumeRecommendation): string {
@@ -119,7 +160,7 @@ export function recommendationToMarkdown(recommendation: ResumeRecommendation): 
   const skills = recommendationSkillsToText(recommendation);
   if (skills) lines.push(`### Technical Skills\n${skills}`);
 
-  const experiences = recommendation.experience.filter((entry) => entry.included);
+  const experiences = objectArray<TextEntry>(recommendation.experience).filter((entry) => entry.included);
   if (experiences.length) {
     lines.push('### Experience');
     experiences.forEach((entry) => {
@@ -128,38 +169,39 @@ export function recommendationToMarkdown(recommendation: ResumeRecommendation): 
     });
   }
 
-  const projects = recommendation.projects.filter((entry) => entry.included);
+  const projects = objectArray<TextEntry>(recommendation.projects).filter((entry) => entry.included);
   if (projects.length) {
     lines.push('### Projects');
     projects.forEach((entry) => {
-      lines.push(`**${entry.name}**${entry.technologies.length ? ` | ${entry.technologies.join(', ')}` : ''}`);
+      const technologies = stringArray(entry.technologies);
+      lines.push(`**${entry.name}**${technologies.length ? ` | ${technologies.join(', ')}` : ''}`);
       includedBullets(entry.bullets).forEach((bullet) => lines.push(`- ${bullet.text}`));
     });
   }
 
-  const education = recommendation.education.filter((entry) => entry.included);
+  const education = objectArray<TextEntry>(recommendation.education).filter((entry) => entry.included);
   if (education.length) {
     lines.push('### Education');
     education.forEach((entry) => lines.push(`- ${joinPresent([entry.degree, entry.institution], ', ')}`));
   }
 
-  const certifications = recommendation.certifications.filter((entry) => entry.included);
+  const certifications = objectArray<TextEntry>(recommendation.certifications).filter((entry) => entry.included);
   if (certifications.length) {
     lines.push('### Certifications');
     certifications.forEach((entry) => lines.push(`- ${joinPresent([entry.name, entry.issuing_org, entry.date])}`));
   }
 
-  const achievements = [...(recommendation.achievements ?? []), ...(recommendation.awards ?? [])].filter((entry) => entry.included);
+  const achievements = [...objectArray<TextEntry>(recommendation.achievements), ...objectArray<TextEntry>(recommendation.awards)].filter((entry) => entry.included);
   if (achievements.length) {
     lines.push('### Achievements');
     achievements.forEach((entry) => lines.push(`- ${joinPresent([entry.title, entry.issuer, entry.date, entry.description])}`));
   }
 
-  (recommendation.custom_sections ?? [])
-    .filter((entry) => entry.included && entry.items.length)
+  objectArray<TextEntry>(recommendation.custom_sections)
+    .filter((entry) => entry.included && stringArray(entry.items).length)
     .forEach((entry) => {
       lines.push(`### ${entry.title}`);
-      entry.items.forEach((item) => lines.push(`- ${item}`));
+      stringArray(entry.items).forEach((item) => lines.push(`- ${item}`));
     });
 
   return lines.filter(Boolean).join('\n\n');

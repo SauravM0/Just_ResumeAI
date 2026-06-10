@@ -1,0 +1,32 @@
+CANDIDATE PROFILE — Profile 01
+Role Target     : Junior Software Engineer
+Experience Level: Entry Level (0–2 years)
+Education       : B.Tech Computer Science, VIT University, 2023
+
+WORK EXPERIENCE
+Intern, Infosys (Jun 2022 – Aug 2022)
+- Worked on internal dashboard using React and Node.js
+- Fixed bugs in REST APIs
+- Participated in daily standups
+
+Final Year Project
+- Built a to-do app using MERN stack
+- Deployed on Heroku
+
+SKILLS
+Languages   : JavaScript, Python, Java
+Frameworks  : React, Node.js, Express
+Databases   : MySQL, MongoDB
+Tools       : Git, VS Code, Postman
+Other       : HTML, CSS, REST APIs
+
+CERTIFICATIONS
+- AWS Cloud Practitioner (2023)
+- HackerRank JavaScript (Gold)
+
+ACHIEVEMENTS
+- Finalist, Smart India Hackathon 2022
+- 3rd place, college coding competition
+
+PREFERRED LOCATIONS: Bangalore, Hyderabad, Remote
+EXPECTED CTC: 6–8 LPA

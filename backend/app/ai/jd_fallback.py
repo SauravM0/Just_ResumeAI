@@ -7,7 +7,15 @@ from __future__ import annotations
 import re
 from collections import Counter
 
-from app.schemas.jd import JDKeyword, JDQualityLevel, JDRequirement, ParsedJD, SeniorityLevel
+from app.schemas.jd import (
+    JDKeyword,
+    JDQualityLevel,
+    JDRequirement,
+    ParsedJD,
+    RequirementPlacement,
+    RequirementPriority,
+    SeniorityLevel,
+)
 from app.services.jd_ats_extraction import enrich_parsed_jd_for_ats
 
 COMMON_SKILLS = {
@@ -205,8 +213,20 @@ def _extract_company(lines: list[str], raw_text: str) -> str | None:
 
     match = re.search(r"\bat\s+([A-Z][A-Za-z0-9&.,' -]{2,60})", raw_text)
     if match:
-        return match.group(1).strip()
+        return _clean_company_name(match.group(1))
     return None
+
+
+def _clean_company_name(value: str | None) -> str | None:
+    cleaned = re.split(
+        r"\s+(?:and\s+join|to\s+grow|join\s+us|to\s+be|where|whether|for\s+our)\b",
+        str(value or "").strip(" .,-"),
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0].strip(" .,-")
+    if not cleaned or len(cleaned.split()) > 5:
+        return None
+    return cleaned
 
 
 def _extract_location(raw_text: str) -> str | None:
@@ -256,7 +276,7 @@ def _looks_like_title_line(line: str) -> bool:
         return False
     title_tokens = (
         "engineer", "developer", "manager", "analyst", "scientist", "designer", "specialist",
-        "consultant", "architect", "administrator", "director", "lead", "intern", "coordinator",
+        "consultant", "consulting", "architect", "administrator", "director", "lead", "intern", "coordinator",
         "officer", "associate", "recruiter", "writer",
     )
     return any(token in lower for token in title_tokens)
@@ -336,9 +356,29 @@ def _extract_requirements(lines: list[str]) -> list[JDRequirement]:
             continue
 
         is_required = _classify_requirement_item(text, section_mode)
+        priority = RequirementPriority.MUST_HAVE if is_required else RequirementPriority.NICE_TO_HAVE
         category = _categorize_requirement(text)
+        
+        # Default placements based on category
+        placements = []
+        if category == "education":
+            placements = [RequirementPlacement.EDUCATION]
+        elif category == "technical_skill":
+            placements = [RequirementPlacement.SKILLS, RequirementPlacement.EXPERIENCE]
+        elif category == "soft_skill":
+            placements = [RequirementPlacement.SUMMARY, RequirementPlacement.EXPERIENCE]
+        else:
+            placements = [RequirementPlacement.EXPERIENCE]
+
         requirements.append(
-            JDRequirement(text=text, is_required=is_required, category=category)
+            JDRequirement(
+                text=text, 
+                is_required=is_required, 
+                priority=priority,
+                category=category,
+                suggested_placement=placements,
+                synonyms=[],
+            )
         )
 
     return _dedupe_requirements(requirements)[:20]

@@ -1,0 +1,7 @@
+# Require human review for quality-critical resume generation changes.
+# Replace @Alexa with the release-review owner or team if this repository uses a different GitHub handle.
+
+backend/app/ai/orchestrators/resume_orchestrator.py @Alexa
+backend/app/services/scoring_service.py @Alexa
+backend/app/services/bullet_quality_service.py @Alexa
+backend/app/agents/resume_agent/recruiter_review_agent.py @Alexa

@@ -16,9 +16,20 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 
-def main() -> int:
+def run_cleanup() -> int:
+    """Run file cleanup and return the number of deleted files.
+
+    Safe to call from the background periodic task in main.py.
+    Logs details about each deletion.
+    """
     deleted_count = delete_expired_files()
-    logger.info("Deleted %s expired generated file(s)", deleted_count)
+    logger.info("Cleanup complete: deleted %s expired generated file(s)", deleted_count)
+    return deleted_count
+
+
+def main() -> int:
+    deleted_count = run_cleanup()
+    logger.info("Manual cleanup run: deleted %s expired generated file(s)", deleted_count)
     return 0
 
 

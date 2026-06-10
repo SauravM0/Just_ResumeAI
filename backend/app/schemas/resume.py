@@ -6,7 +6,7 @@ This is the core data flow: Profile + JD → Recommendations → Human Review �
 from __future__ import annotations
 
 from enum import Enum
-from typing import Optional
+from typing import Any, Literal, Optional
 
 from pydantic import AliasChoices, BaseModel, Field
 
@@ -18,6 +18,7 @@ from .profile import MasterProfile
 
 class BulletStatus(str, Enum):
     """Status of an individual bullet during human review."""
+    NEEDS_REPAIR = "needs_repair"  # Quality gate flagged weak STAR phrasing
     PENDING = "pending"       # AI-generated, awaiting review
     ACCEPTED = "accepted"     # User accepted as-is
     EDITED = "edited"         # User modified the bullet
@@ -60,6 +61,15 @@ class ResumeBullet(BaseModel):
     )
     source_id: Optional[str] = Field(
         None, description="ID of the master profile item this bullet originated from"
+    )
+    repair_note: Optional[str] = Field(
+        None, description="Why the quality gate marked this bullet for rewrite"
+    )
+    star_score: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=100.0,
+        description="Deterministic STAR quality score for action, context, and outcome."
     )
 
 
@@ -108,6 +118,42 @@ class ResumeSkillGroup(BaseModel):
     skills: list[str] = Field(default_factory=list)
 
 
+TypedSkillCategory = Literal[
+    "programming_languages",
+    "frontend_frameworks",
+    "backend_frameworks",
+    "databases",
+    "cloud_devops",
+    "tools",
+    "domain_platforms",
+    "ai_ml",
+    "soft_skills",
+    "learning_focus",
+    "review_needed",
+]
+
+
+class InternalTypedSkillTaxonomy(BaseModel):
+    """
+    Internal normalized skill taxonomy.
+
+    This deliberately does not appear on ResumeRecommendation, preserving the
+    existing public API. Services convert it back to ResumeSkillGroup only at
+    review/render/export boundaries.
+    """
+    programming_languages: list[str] = Field(default_factory=list)
+    frontend_frameworks: list[str] = Field(default_factory=list)
+    backend_frameworks: list[str] = Field(default_factory=list)
+    databases: list[str] = Field(default_factory=list)
+    cloud_devops: list[str] = Field(default_factory=list)
+    tools: list[str] = Field(default_factory=list)
+    domain_platforms: list[str] = Field(default_factory=list)
+    ai_ml: list[str] = Field(default_factory=list)
+    soft_skills: list[str] = Field(default_factory=list)
+    learning_focus: list[str] = Field(default_factory=list)
+    review_needed: list[str] = Field(default_factory=list)
+
+
 class ResumeCertEntry(BaseModel):
     source_id: str
     name: str
@@ -152,6 +198,8 @@ class ResumeRecommendation(BaseModel):
     This is what the user reviews before final rendering.
     """
     generation_id: str = Field(validation_alias=AliasChoices("generation_id", "session_id"))
+    version_id: str = Field(default="v1", description="Unique version ID for this specific content state")
+    content_hash: Optional[str] = Field(None, description="Hash of the resume content to detect changes")
     target_title: str = Field(..., description="Tailored resume title/headline")
     summary: Optional[str] = Field(None, description="AI-generated professional summary")
     contact: ResumeContactInfo = Field(default_factory=ResumeContactInfo)
@@ -164,6 +212,37 @@ class ResumeRecommendation(BaseModel):
     awards: list[ResumeAchievementEntry] = Field(default_factory=list)
     custom_sections: list[ResumeCustomSection] = Field(default_factory=list)
     section_order: list[str] = Field(default_factory=list)
+    locked_fields: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Profile facts frozen at generation time for audit and validation."
+    )
+
+    def calculate_content_hash(self) -> str:
+        """
+        Calculate a stable hash of the resume content to detect meaningful changes.
+        Excludes metadata like version_id and warnings.
+        """
+        import hashlib
+        import json
+        
+        # Extract content fields for hashing
+        content = {
+            "target_title": self.target_title,
+            "summary": self.summary,
+            "contact": self.contact.model_dump(),
+            "experience": [e.model_dump() for e in self.experience if e.included],
+            "education": [e.model_dump() for e in self.education if e.included],
+            "skills": [s.model_dump() for s in self.skills],
+            "projects": [p.model_dump() for p in self.projects if p.included],
+            "certifications": [c.model_dump() for c in self.certifications if c.included],
+            "achievements": [a.model_dump() for a in self.achievements if a.included],
+            "awards": [a.model_dump() for a in self.awards if a.included],
+            "custom_sections": [c.model_dump() for c in self.custom_sections if c.included],
+            "section_order": self.section_order,
+        }
+        
+        dump = json.dumps(content, sort_keys=True, default=str)
+        return hashlib.sha256(dump.encode()).hexdigest()[:16]
 
     # Metadata
     emphasis: Optional[str] = Field(

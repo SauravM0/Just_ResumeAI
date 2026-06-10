@@ -122,3 +122,20 @@ export interface MasterProfile {
   created_at?: string;
   updated_at?: string;
 }
+
+export interface ExtractionConfidenceField {
+  field_path: string;
+  label: string;
+  value?: string | number | boolean | null;
+  confidence: number;
+  reason: string;
+  needs_confirmation?: boolean;
+}
+
+export interface ExtractionConfidenceReport {
+  overall_confidence: number;
+  has_low_confidence_fields: boolean;
+  fields: ExtractionConfidenceField[];
+}
+
+export type LockedFields = Record<string, unknown>;

@@ -1,15 +1,32 @@
 const DEFAULT_LOCAL_API_BASE = 'http://localhost:8000/api/v1';
 
+type RuntimeConfig = Partial<Record<
+  'VITE_API_BASE' | 'VITE_SUPABASE_URL' | 'VITE_SUPABASE_ANON_KEY' | 'VITE_APP_ENV' | 'VITE_APP_VERSION',
+  string
+>>;
+
+declare global {
+  interface Window {
+    __JUSTRESUME_CONFIG__?: RuntimeConfig;
+  }
+}
+
+export function getRuntimeConfig(): RuntimeConfig {
+  return typeof window === 'undefined' ? {} : window.__JUSTRESUME_CONFIG__ ?? {};
+}
+
 function normalizeApiBase(value: string): string {
   return value.replace(/\/+$/, '');
 }
 
 export function getApiBase(): string {
-  const configured = import.meta.env.VITE_API_BASE?.trim();
+  const runtime = getRuntimeConfig();
+  const runtimeApiBase = runtime.VITE_API_BASE?.trim();
+  const configured = runtimeApiBase || import.meta.env.VITE_API_BASE?.trim();
 
   if (configured) {
     const normalized = normalizeApiBase(configured);
-    if (import.meta.env.PROD && normalized.includes('localhost')) {
+    if (!runtimeApiBase && import.meta.env.PROD && normalized.includes('localhost')) {
       throw new Error(
         'VITE_API_BASE points to localhost in production. ' +
         'Set VITE_API_BASE to the deployed backend URL, e.g. https://your-backend.onrender.com/api/v1'

@@ -3,8 +3,9 @@ Cover letter generation endpoint using generation_id.
 Cover letters are saved to resume_generations.cover_letter_text.
 """
 
-from fastapi import APIRouter, Depends, HTTPException
 import logging
+
+from fastapi import APIRouter, Depends, HTTPException
 
 from app.dependencies.auth import get_current_user
 from app.schemas.cover_letter import CoverLetterGenerateRequest, CoverLetterResponse, CoverLetterUpdateRequest
@@ -147,12 +148,12 @@ Write a compelling, personalized cover letter that:
         )
 
     except GeminiClientError as e:
-        logger.error(f"Cover letter generation failed: {e}")
+        logger.error("Cover letter generation failed: %s", e)
         raise HTTPException(status_code=502, detail=f"AI generation failed: {str(e)}")
     except GenerationNotFoundError:
         raise HTTPException(status_code=404, detail="Generation not found")
     except Exception as e:
-        logger.error(f"Unexpected error in cover letter: {e}", exc_info=True)
+        logger.error("Unexpected error in cover letter: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

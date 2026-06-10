@@ -29,6 +29,7 @@ export default function Settings() {
   const [success, setSuccess] = useState<string | null>(null);
   const [targetPages, setTargetPages] = useState(1);
   const [preferredTone, setPreferredTone] = useState('professional');
+  const [aggressiveAtsDefault, setAggressiveAtsDefault] = useState(false);
 
   const appConfig = getAppConfig();
   const email = user?.email ?? '';
@@ -41,6 +42,7 @@ export default function Settings() {
         setSettings(data);
         setTargetPages(data.target_resume_pages);
         setPreferredTone(data.preferred_tone);
+        setAggressiveAtsDefault(Boolean(data.aggressive_ats_default));
         setLoading(false);
       })
       .catch((err) => {
@@ -61,6 +63,7 @@ export default function Settings() {
       const updated = await updateSettings({
         target_resume_pages: targetPages,
         preferred_tone: preferredTone,
+        aggressive_ats_default: aggressiveAtsDefault,
       });
       setSettings(updated);
       setSuccess('Settings saved successfully.');
@@ -127,6 +130,20 @@ export default function Settings() {
                   ))}
                 </div>
                 <span className="form-hint">Senior roles may benefit from a second page.</span>
+              </div>
+
+              <div className="form-group">
+                <label className="setting-option">
+                  <input
+                    type="checkbox"
+                    checked={aggressiveAtsDefault}
+                    onChange={(event) => setAggressiveAtsDefault(event.target.checked)}
+                  />
+                  <div className="setting-option-content">
+                    <strong>Default to Aggressive ATS Mode</strong>
+                    <span>Preselect user-approved keyword expansion for new resumes.</span>
+                  </div>
+                </label>
               </div>
 
               {error && <div className="text-error" style={{ fontSize: '0.85rem', marginBottom: 'var(--space-md)' }}>{error}</div>}

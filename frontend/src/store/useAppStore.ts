@@ -9,7 +9,7 @@ import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import type { ParsedJD } from '../types/jd';
 import type { ATSAlignmentReport } from '../types/alignment';
-import type { ResumeRecommendation, ATSScore, PipelinePdfResult } from '../types/resume';
+import type { ResumeRecommendation, ATSScore, PipelinePdfResult, ValidationStatus, RecruiterReview } from '../types/resume';
 import type { MasterProfile } from '../types/profile';
 
 export type AppStep =
@@ -29,6 +29,8 @@ interface AppState {
 
   parsedJD: ParsedJD | null;
   setParsedJD: (jd: ParsedJD) => void;
+  pipelineWarnings: string[];
+  setPipelineWarnings: (warnings: string[]) => void;
 
   recommendation: ResumeRecommendation | null;
   setRecommendation: (rec: ResumeRecommendation) => void;
@@ -44,6 +46,18 @@ interface AppState {
 
   pipelinePdf: PipelinePdfResult | null;
   setPipelinePdf: (pdf: PipelinePdfResult | null) => void;
+
+  validationStatus: ValidationStatus | null;
+  setValidationStatus: (status: ValidationStatus | null) => void;
+
+  recruiterReview: RecruiterReview | null;
+  setRecruiterReview: (review: RecruiterReview | null) => void;
+
+  scoreHistory: number[];
+  setScoreHistory: (history: number[]) => void;
+
+  strategyHistory: string[];
+  setStrategyHistory: (history: string[]) => void;
 
   activeProfile: MasterProfile | null;
   setActiveProfile: (profile: MasterProfile | null) => void;
@@ -63,6 +77,8 @@ export const useAppStore = create<AppState>()(
 
       parsedJD: null,
       setParsedJD: (jd) => set({ parsedJD: jd }),
+      pipelineWarnings: [],
+      setPipelineWarnings: (pipelineWarnings) => set({ pipelineWarnings }),
 
       recommendation: null,
       setRecommendation: (rec) => set({ recommendation: rec }),
@@ -79,6 +95,18 @@ export const useAppStore = create<AppState>()(
       pipelinePdf: null,
       setPipelinePdf: (pdf) => set({ pipelinePdf: pdf }),
 
+      validationStatus: null,
+      setValidationStatus: (status) => set({ validationStatus: status }),
+
+      recruiterReview: null,
+      setRecruiterReview: (review) => set({ recruiterReview: review }),
+
+      scoreHistory: [],
+      setScoreHistory: (scoreHistory) => set({ scoreHistory }),
+
+      strategyHistory: [],
+      setStrategyHistory: (strategyHistory) => set({ strategyHistory }),
+
       activeProfile: null,
       setActiveProfile: (profile) => set({ activeProfile: profile }),
 
@@ -86,11 +114,16 @@ export const useAppStore = create<AppState>()(
         set({
           generationId: null,
           parsedJD: null,
+          pipelineWarnings: [],
           recommendation: null,
           atsScore: null,
           alignmentReport: null,
           latexSource: null,
           pipelinePdf: null,
+          validationStatus: null,
+          recruiterReview: null,
+          scoreHistory: [],
+          strategyHistory: [],
           activeProfile: null,
           currentStep: 'dashboard',
         }),
@@ -98,11 +131,16 @@ export const useAppStore = create<AppState>()(
         set({
           generationId: null,
           parsedJD: null,
+          pipelineWarnings: [],
           recommendation: null,
           atsScore: null,
           alignmentReport: null,
           latexSource: null,
           pipelinePdf: null,
+          validationStatus: null,
+          recruiterReview: null,
+          scoreHistory: [],
+          strategyHistory: [],
           currentStep: 'jd-input',
         }),
     }),
@@ -113,11 +151,15 @@ export const useAppStore = create<AppState>()(
         currentStep: state.currentStep,
         generationId: state.generationId,
         parsedJD: state.parsedJD,
+        pipelineWarnings: state.pipelineWarnings,
         recommendation: state.recommendation,
         atsScore: state.atsScore,
         alignmentReport: state.alignmentReport,
         latexSource: state.latexSource,
         pipelinePdf: state.pipelinePdf,
+        recruiterReview: state.recruiterReview,
+        scoreHistory: state.scoreHistory,
+        strategyHistory: state.strategyHistory,
       }),
     },
   ),

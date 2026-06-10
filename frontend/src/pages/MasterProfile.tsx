@@ -1,11 +1,20 @@
 import { useEffect, useState, useCallback } from 'react';
-import { getMyProfile, saveMyProfile } from '../lib/profileApi';
+import {
+  activateSourceResume,
+  getProfileEmbeddingStatus,
+  getMyProfile,
+  listSourceResumes,
+  saveMyProfile,
+  uploadSourceResume,
+} from '../lib/profileApi';
 import { createBlankProfile, sanitizeProfile } from '../lib/profile';
 import { useAppStore } from '../store/useAppStore';
 import PageHeader from '../components/ui/PageHeader';
 import PrimaryActionBar from '../components/ui/PrimaryActionBar';
 import LoadingState from '../components/ui/LoadingState';
-import type { MasterProfile, WorkExperience, Education, Skill, Project, Certification, Award } from '../types/profile';
+import ProfileConfirmationModal from '../components/ui/ProfileConfirmationModal';
+import type { ExtractionConfidenceReport, LockedFields, MasterProfile, WorkExperience, Education, Skill, Project, Certification, Award } from '../types/profile';
+import type { SourceResumeSummary } from '../lib/profileApi';
 
 type Tab = 'contact' | 'experience' | 'education' | 'skills' | 'projects' | 'credentials';
 
@@ -16,7 +25,15 @@ export default function MasterProfilePage() {
   const [saved, setSaved] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [completionScore, setCompletionScore] = useState(0);
+  const [sourceResumes, setSourceResumes] = useState<SourceResumeSummary[]>([]);
+  const [activeSourceResumeId, setActiveSourceResumeId] = useState<string | null>(null);
+  const [importPreview, setImportPreview] = useState<MasterProfile | null>(null);
+  const [confidenceReport, setConfidenceReport] = useState<ExtractionConfidenceReport | null>(null);
+  const [showConfirmationModal, setShowConfirmationModal] = useState(false);
+  const [lockedFields, setLockedFields] = useState<LockedFields>({});
+  const [sourceWarnings, setSourceWarnings] = useState<string[]>([]);
+  const [uploadingSource, setUploadingSource] = useState(false);
+  const [embeddingStatus, setEmbeddingStatus] = useState<'idle' | 'analysing' | 'complete' | 'failed'>('idle');
   const { setActiveProfile } = useAppStore();
 
   useEffect(() => {
@@ -29,7 +46,6 @@ export default function MasterProfilePage() {
         const prof = response.profile_json || createBlankProfile();
         if (cancelled) return;
         setProfile(prof);
-        setCompletionScore(response.profile_completion_score);
         setActiveProfile(prof);
       } catch (loadError) {
         if (cancelled) return;
@@ -43,6 +59,22 @@ export default function MasterProfilePage() {
     void loadProfile();
     return () => { cancelled = true; };
   }, [setActiveProfile]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadSourceResumes() {
+      try {
+        const response = await listSourceResumes();
+        if (cancelled) return;
+        setSourceResumes(response.resumes);
+        setActiveSourceResumeId(response.active_source_resume_id || null);
+      } catch {
+        if (!cancelled) setSourceResumes([]);
+      }
+    }
+    void loadSourceResumes();
+    return () => { cancelled = true; };
+  }, []);
 
   const handleSave = useCallback(async () => {
     if (!profile) return;
@@ -60,8 +92,8 @@ export default function MasterProfilePage() {
       const response = await saveMyProfile(savedProfile);
       const persistedProfile = response.profile_json || savedProfile;
       setProfile(persistedProfile);
-      setCompletionScore(response.profile_completion_score);
       setActiveProfile(persistedProfile);
+      setEmbeddingStatus('analysing');
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch (saveError) {
@@ -75,10 +107,118 @@ export default function MasterProfilePage() {
     setProfile((prev) => prev ? { ...prev, ...updates } : prev);
   }, []);
 
+  const handleSourceUpload = useCallback(async (file?: File) => {
+    if (!file) return;
+    setUploadingSource(true);
+    setError(null);
+    setSourceWarnings([]);
+    try {
+      const response = await uploadSourceResume(file);
+      setImportPreview(response.extracted_profile);
+      setConfidenceReport(response.confidence || null);
+      setLockedFields(response.locked_fields || {});
+      setSourceWarnings(response.warnings);
+      if (response.confidence?.has_low_confidence_fields) {
+        setShowConfirmationModal(true);
+      } else {
+        // All high confidence — directly populate the form
+        const imported = sanitizeProfile(response.extracted_profile);
+        if (profile) {
+          setProfile({
+            ...imported,
+            id: profile.id,
+            created_at: profile.created_at,
+            updated_at: profile.updated_at,
+          });
+        }
+        setSaved(true);
+        setTimeout(() => setSaved(false), 2000);
+      }
+      const sourceList = await listSourceResumes();
+      setSourceResumes(sourceList.resumes);
+      setActiveSourceResumeId(sourceList.active_source_resume_id || response.source_resume.id);
+    } catch (uploadError) {
+      setError(uploadError instanceof Error ? uploadError.message : 'Unable to import source resume.');
+    } finally {
+      setUploadingSource(false);
+    }
+  }, [profile]);
+
+  const handleApplyImport = useCallback(() => {
+    if (!profile || !importPreview) return;
+    const imported = sanitizeProfile(importPreview);
+    setProfile({
+      ...imported,
+      id: profile.id,
+      created_at: profile.created_at,
+      updated_at: profile.updated_at,
+    });
+    setSaved(false);
+  }, [importPreview, profile]);
+
+  const handleConfirmationComplete = useCallback((correctedProfile: MasterProfile) => {
+    setShowConfirmationModal(false);
+    const imported = sanitizeProfile(correctedProfile);
+    setImportPreview(imported);
+    if (!profile) return;
+    setProfile({
+      ...imported,
+      id: profile.id,
+      created_at: profile.created_at,
+      updated_at: profile.updated_at,
+    });
+    setSaved(false);
+  }, [profile]);
+
+  const handleActivateSource = useCallback(async (sourceResumeId: string) => {
+    try {
+      const response = await activateSourceResume(sourceResumeId);
+      setSourceResumes(response.resumes);
+      setActiveSourceResumeId(response.active_source_resume_id || null);
+    } catch (activateError) {
+      setError(activateError instanceof Error ? activateError.message : 'Unable to activate source resume.');
+    }
+  }, []);
+
+  useEffect(() => {
+    if (embeddingStatus !== 'analysing') return;
+    let cancelled = false;
+    let attempts = 0;
+    const poll = window.setInterval(() => {
+      attempts += 1;
+      void getProfileEmbeddingStatus()
+        .then((status) => {
+          if (cancelled) return;
+          const normalized = String(status.status || '').toLowerCase();
+          if (normalized === 'complete' || (status.count || 0) > 0) {
+            setEmbeddingStatus('complete');
+            window.clearInterval(poll);
+          } else if (normalized === 'failed') {
+            setEmbeddingStatus('failed');
+            window.clearInterval(poll);
+          } else if (attempts >= 10) {
+            setEmbeddingStatus('complete');
+            window.clearInterval(poll);
+          }
+        })
+        .catch(() => {
+          if (attempts >= 4) {
+            setEmbeddingStatus('failed');
+            window.clearInterval(poll);
+          }
+        });
+    }, 2500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(poll);
+    };
+  }, [embeddingStatus]);
+
   if (loading || !profile) {
     return <LoadingState text="Loading your master profile..." />;
   }
 
+  const profileQuality = calculateProfileQuality(profile);
   const tabs: { key: Tab; label: string; icon: string }[] = [
     { key: 'contact', label: 'Contact', icon: '👤' },
     { key: 'experience', label: 'Experience', icon: '💼' },
@@ -93,7 +233,13 @@ export default function MasterProfilePage() {
       <PageHeader
         title="Master Profile"
         subtitle="Your source of truth — all resume data comes from here."
-        badge={<span className="badge badge-info">{completionScore}% complete</span>}
+        badge={<span className="badge badge-info">{profileQuality.score}% complete</span>}
+      />
+
+      <ProfileQualityIndicator
+        score={profileQuality.score}
+        missingSection={profileQuality.missingSection}
+        embeddingStatus={embeddingStatus}
       />
 
       {error && (
@@ -108,22 +254,44 @@ export default function MasterProfilePage() {
         </div>
       )}
 
-      <div className="tabs" style={{ marginBottom: 'var(--space-lg)' }}>
+      <SourceResumePanel
+        sourceResumes={sourceResumes}
+        activeSourceResumeId={activeSourceResumeId}
+        importPreview={importPreview}
+        warnings={sourceWarnings}
+        uploading={uploadingSource}
+        onUpload={handleSourceUpload}
+        onApply={handleApplyImport}
+        onActivate={handleActivateSource}
+      />
+
+      {importPreview && confidenceReport && (
+        <ProfileConfirmationModal
+          isOpen={showConfirmationModal}
+          confidenceReport={confidenceReport}
+          profile={importPreview}
+          onConfirm={handleConfirmationComplete}
+          onSkip={() => setShowConfirmationModal(false)}
+        />
+      )}
+
+      <div className="tabs profile-tabs" style={{ marginBottom: 'var(--space-lg)' }}>
         {tabs.map((tab) => (
           <button
             key={tab.key}
             className={`tab ${activeTab === tab.key ? 'active' : ''}`}
             onClick={() => setActiveTab(tab.key)}
           >
-            {tab.icon} {tab.label}
+            <span className="profile-tab-mark" aria-hidden="true">{tab.icon}</span>
+            {tab.label}
           </button>
         ))}
       </div>
 
       <div className="animate-fade-in" key={activeTab}>
         {activeTab === 'contact' && <ContactForm profile={profile} onChange={updateProfile} />}
-        {activeTab === 'experience' && <ExperienceForm profile={profile} onChange={updateProfile} />}
-        {activeTab === 'education' && <EducationForm profile={profile} onChange={updateProfile} />}
+        {activeTab === 'experience' && <ExperienceForm profile={profile} lockedFields={lockedFields} onChange={updateProfile} />}
+        {activeTab === 'education' && <EducationForm profile={profile} lockedFields={lockedFields} onChange={updateProfile} />}
         {activeTab === 'skills' && <SkillsForm profile={profile} onChange={updateProfile} />}
         {activeTab === 'projects' && <ProjectsForm profile={profile} onChange={updateProfile} />}
         {activeTab === 'credentials' && <CredentialsForm profile={profile} onChange={updateProfile} />}
@@ -141,7 +309,136 @@ export default function MasterProfilePage() {
   );
 }
 
+function SourceResumePanel({
+  sourceResumes,
+  activeSourceResumeId,
+  importPreview,
+  warnings,
+  uploading,
+  onUpload,
+  onApply,
+  onActivate,
+}: {
+  sourceResumes: SourceResumeSummary[];
+  activeSourceResumeId: string | null;
+  importPreview: MasterProfile | null;
+  warnings: string[];
+  uploading: boolean;
+  onUpload: (file?: File) => void;
+  onApply: () => void;
+  onActivate: (sourceResumeId: string) => void;
+}) {
+  const active = sourceResumes.find((resume) => resume.id === activeSourceResumeId);
+
+  return (
+    <section className="card" style={{ marginBottom: 'var(--space-lg)' }}>
+      <div className="profile-card-header">
+        <div>
+          <div className="card-title">Source Resume</div>
+          <div className="card-subtitle">{active ? active.display_name : 'No active uploaded resume'}</div>
+        </div>
+        <label className={`btn btn-secondary btn-sm ${uploading ? 'disabled' : ''}`}>
+          {uploading ? 'Extracting...' : 'Upload PDF, DOCX, or TXT'}
+          <input
+            type="file"
+            accept=".pdf,.docx,.txt"
+            hidden
+            disabled={uploading}
+            onChange={(event) => {
+              onUpload(event.target.files?.[0]);
+              event.currentTarget.value = '';
+            }}
+          />
+        </label>
+      </div>
+
+      {sourceResumes.length > 0 && (
+        <div style={{ display: 'grid', gap: 'var(--space-sm)', marginTop: 'var(--space-md)' }}>
+          {sourceResumes.map((resume) => (
+            <div key={resume.id} className="profile-inline-row">
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 600 }}>{resume.display_name}</div>
+                <div className="card-subtitle">{resume.file_type.toUpperCase()} uploaded source</div>
+              </div>
+              {resume.id === activeSourceResumeId ? (
+                <span className="badge badge-info">Active</span>
+              ) : (
+                <button className="btn btn-ghost btn-sm" onClick={() => onActivate(resume.id)}>Set Active</button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {importPreview && (
+        <div style={{ borderTop: '1px solid var(--border-primary)', marginTop: 'var(--space-md)', paddingTop: 'var(--space-md)' }}>
+          <div className="profile-card-header">
+            <div>
+              <div className="card-title">Extracted Profile Preview</div>
+              <div className="card-subtitle">
+                {importPreview.contact.full_name || 'Unnamed candidate'} | {importPreview.work_experience.length} roles | {importPreview.skills.length} skills
+              </div>
+            </div>
+            <button className="btn btn-primary btn-sm" onClick={onApply}>Use In Profile Editor</button>
+          </div>
+          {warnings.map((warning) => (
+            <div key={warning} className="warning-banner warning-warn" style={{ marginTop: 'var(--space-sm)' }}>
+              <span>{warning}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 // ─── Contact Form ───────────────────────────────────────────────────────────
+
+function ProfileQualityIndicator({
+  score,
+  missingSection,
+  embeddingStatus,
+}: {
+  score: number;
+  missingSection: string;
+  embeddingStatus: 'idle' | 'analysing' | 'complete' | 'failed';
+}) {
+  return (
+    <section className="profile-quality-card">
+      <div
+        className="profile-quality-ring"
+        style={{ background: `conic-gradient(var(--status-success) ${score * 3.6}deg, var(--bg-glass-strong) 0deg)` }}
+        aria-label={`Profile completeness ${score}%`}
+      >
+        <span>{score}%</span>
+      </div>
+      <div className="profile-quality-copy">
+        <strong>Your profile is {score}% complete</strong>
+        <p>Add {missingSection} to improve your ATS match rate.</p>
+      </div>
+      {embeddingStatus === 'analysing' && <span className="badge badge-info"><span className="spinner" /> Analysing your profile...</span>}
+      {embeddingStatus === 'complete' && <span className="badge badge-success">Profile analysis complete</span>}
+      {embeddingStatus === 'failed' && <span className="badge badge-warning">Profile analysis pending</span>}
+    </section>
+  );
+}
+
+function calculateProfileQuality(profile: MasterProfile): { score: number; missingSection: string } {
+  const sections = [
+    { label: 'contact info', weight: 20, done: Boolean(profile.contact.email?.trim() && (profile.contact.phone?.trim() || profile.contact.linkedin_url?.trim())) },
+    { label: 'work experience', weight: 25, done: profile.work_experience.some((exp) => exp.company.trim() && exp.bullets.filter(Boolean).length >= 2) },
+    { label: 'projects with technologies', weight: 20, done: profile.projects.filter((project) => project.name.trim() && project.technologies.length > 0).length >= 2 },
+    { label: 'at least 5 skills', weight: 15, done: profile.skills.filter((skill) => skill.name.trim()).length >= 5 },
+    { label: 'education with GPA', weight: 10, done: profile.education.some((edu) => edu.institution.trim() && edu.gpa?.trim()) },
+    { label: 'an achievement or certification', weight: 10, done: profile.awards.some((award) => award.title.trim()) || profile.certifications.some((cert) => cert.name.trim()) },
+  ];
+  const score = sections.reduce((total, section) => total + (section.done ? section.weight : 0), 0);
+  return { score, missingSection: sections.find((section) => !section.done)?.label || 'fresh evidence as you grow' };
+}
+
+function isLockedField(lockedFields: LockedFields, path: string): boolean {
+  return Boolean(lockedFields[path] || lockedFields[path.replace(/\.(\d+)\./g, '[$1].')]);
+}
 
 function ContactForm({ profile, onChange }: { profile: MasterProfile; onChange: (u: Partial<MasterProfile>) => void }) {
   const c = profile.contact;
@@ -193,7 +490,15 @@ function ContactForm({ profile, onChange }: { profile: MasterProfile; onChange: 
 
 // ─── Experience Form ────────────────────────────────────────────────────────
 
-function ExperienceForm({ profile, onChange }: { profile: MasterProfile; onChange: (u: Partial<MasterProfile>) => void }) {
+function ExperienceForm({
+  profile,
+  lockedFields,
+  onChange,
+}: {
+  profile: MasterProfile;
+  lockedFields: LockedFields;
+  onChange: (u: Partial<MasterProfile>) => void;
+}) {
   const experiences = profile.work_experience;
 
   const addExp = () => {
@@ -257,7 +562,12 @@ function ExperienceForm({ profile, onChange }: { profile: MasterProfile; onChang
               <input className="form-input" value={exp.title} onChange={(e) => updateExp(i, { title: e.target.value })} placeholder="Software Engineer" />
             </div>
             <div className="form-group">
-              <label className="form-label">Company *</label>
+              <label className="form-label">
+                Company *
+                {isLockedField(lockedFields, `work_experience.${i}.company`) && (
+                  <span className="locked-edit-hint" title="This will update the locked value - make sure this is accurate">Verified</span>
+                )}
+              </label>
               <input className="form-input" value={exp.company} onChange={(e) => updateExp(i, { company: e.target.value })} placeholder="Google" />
             </div>
           </div>
@@ -282,9 +592,9 @@ function ExperienceForm({ profile, onChange }: { profile: MasterProfile; onChang
           <div className="form-group">
             <label className="form-label">Bullet Points</label>
             {exp.bullets.map((bullet, bi) => (
-              <div key={bi} style={{ display: 'flex', gap: 'var(--space-sm)', marginBottom: 'var(--space-xs)' }}>
+              <div key={bi} className="profile-inline-row">
                 <input className="form-input" value={bullet} onChange={(e) => updateBullet(i, bi, e.target.value)} placeholder="Describe an achievement..." />
-                <button className="btn btn-ghost btn-sm" onClick={() => removeBullet(i, bi)}>✕</button>
+                <button className="btn btn-ghost btn-sm" onClick={() => removeBullet(i, bi)} aria-label="Remove bullet">Remove</button>
               </div>
             ))}
             <button className="btn btn-ghost btn-sm" onClick={() => addBullet(i)}>+ Add Bullet</button>
@@ -298,7 +608,15 @@ function ExperienceForm({ profile, onChange }: { profile: MasterProfile; onChang
 
 // ─── Education Form ─────────────────────────────────────────────────────────
 
-function EducationForm({ profile, onChange }: { profile: MasterProfile; onChange: (u: Partial<MasterProfile>) => void }) {
+function EducationForm({
+  profile,
+  lockedFields,
+  onChange,
+}: {
+  profile: MasterProfile;
+  lockedFields: LockedFields;
+  onChange: (u: Partial<MasterProfile>) => void;
+}) {
   const eduList = profile.education;
 
   const addEdu = () => {
@@ -341,7 +659,12 @@ function EducationForm({ profile, onChange }: { profile: MasterProfile; onChange
           </div>
           <div className="form-row">
             <div className="form-group">
-              <label className="form-label">Institution *</label>
+              <label className="form-label">
+                Institution *
+                {isLockedField(lockedFields, `education.${i}.institution`) && (
+                  <span className="locked-edit-hint" title="This will update the locked value - make sure this is accurate">Verified</span>
+                )}
+              </label>
               <input className="form-input" value={edu.institution} onChange={(e) => updateEdu(i, { institution: e.target.value })} placeholder="Stanford University" />
             </div>
             <div className="form-group">
@@ -395,6 +718,19 @@ function SkillsForm({ profile, onChange }: { profile: MasterProfile; onChange: (
     onChange({ skills: skills.filter((_, i) => i !== index) });
   };
 
+  const categoryOptions = [
+    'Programming Languages',
+    'Frontend Frameworks',
+    'Backend Frameworks',
+    'Databases',
+    'Cloud & DevOps',
+    'Tools',
+    'Domain Platforms',
+    'AI & ML',
+    'Soft Skills',
+    'Learning Focus',
+  ];
+
   // Group by category for display
   const categories = [...new Set(skills.map((s) => s.category || 'Uncategorized'))];
 
@@ -410,17 +746,36 @@ function SkillsForm({ profile, onChange }: { profile: MasterProfile; onChange: (
         </div>
 
         {skills.map((skill, i) => (
-          <div key={i} style={{ display: 'flex', gap: 'var(--space-sm)', marginBottom: 'var(--space-sm)', alignItems: 'center' }}>
-            <input className="form-input" value={skill.name} onChange={(e) => updateSkill(i, { name: e.target.value })} placeholder="Skill name" style={{ flex: 2 }} />
-            <input className="form-input" value={skill.category || ''} onChange={(e) => updateSkill(i, { category: e.target.value })} placeholder="Category (e.g. Languages)" style={{ flex: 2 }} />
-            <select className="form-select" value={skill.level || ''} onChange={(e) => updateSkill(i, { level: (e.target.value || undefined) as Skill['level'] })} style={{ flex: 1 }}>
+          <div key={i} className="profile-skill-row">
+            <input
+              aria-label={`Skill ${i + 1} name`}
+              className="form-input"
+              value={skill.name}
+              onChange={(e) => updateSkill(i, { name: e.target.value })}
+              placeholder="Skill name"
+            />
+            <select
+              aria-label={`Skill ${i + 1} category`}
+              className="form-select"
+              value={skill.category || ''}
+              onChange={(e) => updateSkill(i, { category: e.target.value })}
+            >
+              <option value="">Choose category</option>
+              {categoryOptions.map((category) => <option key={category} value={category}>{category}</option>)}
+            </select>
+            <select
+              aria-label={`Skill ${i + 1} level`}
+              className="form-select"
+              value={skill.level || ''}
+              onChange={(e) => updateSkill(i, { level: (e.target.value || undefined) as Skill['level'] })}
+            >
               <option value="">Level</option>
               <option value="beginner">Beginner</option>
               <option value="intermediate">Intermediate</option>
               <option value="advanced">Advanced</option>
               <option value="expert">Expert</option>
             </select>
-            <button className="btn btn-ghost btn-sm" onClick={() => removeSkill(i)}>✕</button>
+            <button className="btn btn-ghost btn-sm" onClick={() => removeSkill(i)} aria-label={`Remove skill ${i + 1}`}>Remove</button>
           </div>
         ))}
 
@@ -513,13 +868,13 @@ function ProjectsForm({ profile, onChange }: { profile: MasterProfile; onChange:
           <div className="form-group">
             <label className="form-label">Key Points</label>
             {proj.bullets.map((bullet, bi) => (
-              <div key={bi} style={{ display: 'flex', gap: 'var(--space-sm)', marginBottom: 'var(--space-xs)' }}>
+              <div key={bi} className="profile-inline-row">
                 <input className="form-input" value={bullet} onChange={(e) => {
                   const bullets = [...proj.bullets];
                   bullets[bi] = e.target.value;
                   updateProject(i, { bullets });
                 }} placeholder="Describe a feature or achievement..." />
-                <button className="btn btn-ghost btn-sm" onClick={() => updateProject(i, { bullets: proj.bullets.filter((_, j) => j !== bi) })}>✕</button>
+                <button className="btn btn-ghost btn-sm" onClick={() => updateProject(i, { bullets: proj.bullets.filter((_, j) => j !== bi) })} aria-label="Remove project point">Remove</button>
               </div>
             ))}
             <button className="btn btn-ghost btn-sm" onClick={() => updateProject(i, { bullets: [...proj.bullets, ''] })}>+ Add Point</button>
@@ -576,7 +931,7 @@ function CredentialsForm({ profile, onChange }: { profile: MasterProfile; onChan
   return (
     <div>
       <div className="card" style={{ marginBottom: 'var(--space-md)' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 'var(--space-lg)' }}>
+        <div className="profile-card-header">
           <div>
             <div className="card-title">Certifications</div>
             <div className="card-subtitle">Licenses, cloud badges, platform certificates, and course certificates.</div>
@@ -625,7 +980,7 @@ function CredentialsForm({ profile, onChange }: { profile: MasterProfile; onChan
       </div>
 
       <div className="card">
-        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 'var(--space-lg)' }}>
+        <div className="profile-card-header">
           <div>
             <div className="card-title">Achievements & Awards</div>
             <div className="card-subtitle">Hackathons, recognitions, scholarships, honors, and competition results.</div>

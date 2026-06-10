@@ -1,0 +1,30 @@
+Rahul Sharma
+rahul.sharma@gmail.com | 9876543210 | Bangalore
+
+OBJECTIVE
+I am a fresher looking for a software engineering job where I can use my skills in React and Node.js.
+I am hardworking and a quick learner.
+
+EDUCATION
+B.Tech in Computer Science – VIT University (2019–2023) – CGPA: 8.2
+
+INTERNSHIP
+Infosys, Software Intern (Jun–Aug 2022)
+- Worked on a dashboard
+- Did bug fixing in APIs
+- Was part of the team
+
+PROJECTS
+To-Do App (MERN Stack)
+- Made a to-do app
+- Used MongoDB, Express, React, Node
+- Put it on Heroku
+
+SKILLS
+JavaScript, Python, Java, React, Node.js, Express, MySQL, MongoDB, Git, HTML, CSS, REST APIs
+
+CERTIFICATIONS
+AWS Cloud Practitioner | HackerRank JavaScript Gold
+
+HOBBIES
+Cricket, Chess, Travelling

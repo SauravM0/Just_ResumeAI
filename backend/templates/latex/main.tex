@@ -1,0 +1,233 @@
+%-------------------------
+% Resume in Latex
+% Author : Jake Gutierrez
+% Based off of: https://github.com/sb2nov/resume
+% License : MIT
+%------------------------
+
+\documentclass[letterpaper,11pt]{article}
+
+\usepackage{latexsym}
+\usepackage[empty]{fullpage}
+\usepackage{titlesec}
+\usepackage{marvosym}
+\usepackage[usenames,dvipsnames]{color}
+\usepackage{verbatim}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{fancyhdr}
+\usepackage[english]{babel}
+\usepackage{tabularx}
+\usepackage{hyphenat}
+\input{glyphtounicode}
+
+%----------FONT OPTIONS----------
+% sans-serif
+% \usepackage[sfdefault]{FiraSans}
+% \usepackage[sfdefault]{roboto}
+% \usepackage[sfdefault]{noto-sans}
+% \usepackage[default]{sourcesanspro}
+
+% serif
+% \usepackage{CormorantGaramond}
+% \usepackage{charter}
+
+
+\pagestyle{fancy}
+\fancyhf{} % clear all header and footer fields
+\fancyfoot{}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+% Adjust margins
+\addtolength{\oddsidemargin}{-0.5in}
+\addtolength{\evensidemargin}{-0.5in}
+\addtolength{\textwidth}{1in}
+\addtolength{\topmargin}{-.5in}
+\addtolength{\textheight}{1.0in}
+
+\urlstyle{same}
+
+\raggedbottom
+\raggedright
+\setlength{\tabcolsep}{0in}
+
+% Sections formatting
+\titleformat{\section}{
+  \vspace{-4pt}\scshape\raggedright\large
+}{}{0em}{}[\color{black}\titlerule \vspace{-5pt}]
+
+% Ensure that generate pdf is machine readable/ATS parsable
+\pdfgentounicode=1
+
+%-------------------------
+% Custom commands
+\newcommand{\resumeItem}[1]{
+  \item\small{
+    {#1 \vspace{-2pt}}
+  }
+}
+
+\newcommand{\resumeSubheading}[4]{
+  \vspace{-2pt}\item
+    \begin{tabular*}{0.97\textwidth}[t]{l@{\extracolsep{\fill}}r}
+      \textbf{#1} & #2 \\
+      \textit{\small#3} & \textit{\small #4} \\
+    \end{tabular*}\vspace{-7pt}
+}
+
+\newcommand{\resumeSubSubheading}[2]{
+    \item
+    \begin{tabular*}{0.97\textwidth}{l@{\extracolsep{\fill}}r}
+      \textit{\small#1} & \textit{\small #2} \\
+    \end{tabular*}\vspace{-7pt}
+}
+
+\newcommand{\resumeProjectHeading}[2]{
+    \item
+    \begin{tabular*}{0.97\textwidth}{l@{\extracolsep{\fill}}r}
+      \small#1 & #2 \\
+    \end{tabular*}\vspace{-7pt}
+}
+
+\newcommand{\resumeSimpleHeading}[3]{
+  \vspace{-2pt}\item
+    \begin{tabular*}{0.97\textwidth}[t]{l@{\extracolsep{\fill}}r}
+      \textbf{#1} & {\small #2} \\
+      \textit{\small#3} & \\
+    \end{tabular*}\vspace{-7pt}
+}
+
+\newcommand{\resumeSubItem}[1]{\resumeItem{#1}\vspace{-4pt}}
+
+\renewcommand\labelitemii{$\vcenter{\hbox{\tiny$\bullet$}}$}
+
+\newcommand{\resumeSubHeadingListStart}{\begin{itemize}[leftmargin=0.15in, label={}]}
+\newcommand{\resumeSubHeadingListEnd}{\end{itemize}}
+\newcommand{\resumeItemListStart}{\begin{itemize}}
+\newcommand{\resumeItemListEnd}{\end{itemize}\vspace{-5pt}}
+
+%-------------------------------------------
+%%%%%%  RESUME STARTS HERE  %%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+\begin{document}
+
+\begin{center}
+    \textbf{\Huge \scshape << contact_name >>} \\ \vspace{1pt}
+    <% if target_title %>\small\textit{<< target_title >>} \\ \vspace{1pt}<% endif %>
+    \small
+    <% if contact_phone %><< contact_phone >><% endif %>
+    <% if contact_email %><% if contact_phone %> $|$ <% endif %>\href{mailto:<< contact_email >>}{<< contact_email >>}<% endif %>
+    <% if contact_linkedin %><% if contact_phone or contact_email %> $|$ <% endif %>\href{<< contact_linkedin >>}{LinkedIn}<% endif %>
+    <% if contact_github %><% if contact_phone or contact_email or contact_linkedin %> $|$ <% endif %>\href{<< contact_github >>}{GitHub}<% endif %>
+    <% if contact_portfolio %><% if contact_phone or contact_email or contact_linkedin or contact_github %> $|$ <% endif %>\href{<< contact_portfolio >>}{Portfolio}<% endif %>
+    <% if contact_location %><% if contact_phone or contact_email or contact_linkedin or contact_github or contact_portfolio %> $|$ <% endif %><< contact_location >><% endif %>
+\end{center}
+
+<% for section_name in section_order_list %>
+<% if section_name == "summary" and summary %>
+\section{Summary}
+\small{<< summary >>}
+\vspace{-4pt}
+
+<% elif section_name == "skills" and skills %>
+%-----------PROGRAMMING SKILLS-----------
+\section{Technical Skills}
+ \begin{itemize}[leftmargin=0.15in, label={}]
+    \small{\item{
+      <% for skill_group in skills %>
+      \textbf{<< skill_group.category >>}{: << skill_group.skills >>}<% if not loop.last %> \\ \vspace{3pt}<% endif %>
+      <% endfor %>
+    }}
+ \end{itemize}
+
+<% elif section_name == "experience" and experiences %>
+%-----------EXPERIENCE-----------
+\section{Experience}
+  \resumeSubHeadingListStart
+    <% for exp in experiences %>
+    \resumeSubheading
+      {<< exp.company >>}{<< exp.location >>}
+      {<< exp.title >>}{<< exp.date_range >>}
+      \resumeItemListStart
+        <% for bullet in exp.bullets %>
+        \resumeItem{<< bullet >>}
+        <% endfor %>
+      \resumeItemListEnd
+    <% endfor %>
+  \resumeSubHeadingListEnd
+
+<% elif section_name == "projects" and projects %>
+%-----------PROJECTS-----------
+\section{Projects}
+    \resumeSubHeadingListStart
+      <% for project in projects %>
+      \resumeProjectHeading
+          {\textbf{<< project.name >>}<% if project.technologies %> $|$ \emph{<< project.technologies >>}<% endif %>}{}
+          \resumeItemListStart
+            <% for bullet in project.bullets %>
+            \resumeItem{<< bullet >>}
+            <% endfor %>
+          \resumeItemListEnd
+      <% endfor %>
+    \resumeSubHeadingListEnd
+
+<% elif section_name == "education" and education %>
+%-----------EDUCATION-----------
+\section{Education}
+  \resumeSubHeadingListStart
+    <% for edu in education %>
+    \resumeSubheading
+      {<< edu.institution >>}{<< edu.location >>}
+      {<< edu.degree_line >>}{<< edu.date_range >>}
+      <% if edu.detail_line or edu.coursework %>
+      \resumeItemListStart
+        <% if edu.detail_line %>\resumeItem{<< edu.detail_line >>}<% endif %>
+        <% if edu.coursework %>\resumeItem{Relevant Coursework: << ", ".join(edu.coursework) >>}<% endif %>
+      \resumeItemListEnd
+      <% endif %>
+    <% endfor %>
+  \resumeSubHeadingListEnd
+
+<% elif section_name == "certifications" and certifications %>
+%-----------CERTIFICATIONS-----------
+\section{Certifications}
+  \resumeSubHeadingListStart
+    <% for cert in certifications %>
+    \resumeSimpleHeading
+      {<< cert.name >>}{<< cert.date >>}
+      {<< cert.issuer >>}
+    <% endfor %>
+  \resumeSubHeadingListEnd
+
+<% elif section_name == "achievements" and achievements %>
+%-----------ACHIEVEMENTS-----------
+\section{Awards \& Achievements}
+  \resumeSubHeadingListStart
+    <% for item in achievements %>
+    \resumeSimpleHeading
+      {<< item.title >>}{<< item.date >>}
+      {<< item.issuer >>}
+      <% if item.description %>
+      \resumeItemListStart
+        \resumeItem{<< item.description >>}
+      \resumeItemListEnd
+      <% endif %>
+    <% endfor %>
+  \resumeSubHeadingListEnd
+
+<% endif %>
+<% endfor %>
+
+<% for custom_section in custom_sections %>
+\section{<< custom_section.title >>}
+  \resumeItemListStart
+    <% for item in custom_section.items %>
+    \resumeItem{<< item >>}
+    <% endfor %>
+  \resumeItemListEnd
+<% endfor %>
+
+%-------------------------------------------
+\end{document}

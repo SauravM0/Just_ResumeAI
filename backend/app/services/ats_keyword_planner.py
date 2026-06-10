@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import re
 
-from app.schemas.ats_planner import ATSKeywordPlannerOutput
-from app.schemas.jd import ParsedJD
+from app.schemas.ats_planner import ATSKeywordPlannerOutput, PlannedRequirement
+from app.schemas.jd import ParsedJD, RequirementPlacement, RequirementPriority
 from app.schemas.profile import MasterProfile, Project, WorkExperience
 from app.schemas.resume import ResumeRecommendation
+from app.services.jd_sanitization_service import sanitize_parsed_jd
 from app.services.resume_strategy_service import build_resume_strategy
+from app.services.skill_taxonomy_service import clean_keyword_terms
+from app.services.candidate_timeline_service import choose_honest_target_title
+from app.services.candidate_evidence_service import build_candidate_evidence
+from app.services.synonym_service import get_all_forms
 
 
 def build_ats_keyword_plan(
@@ -16,65 +21,112 @@ def build_ats_keyword_plan(
     target_pages: int = 1,
     current_draft: ResumeRecommendation | None = None,
 ) -> ATSKeywordPlannerOutput:
-    """Create an ATS optimization plan from JD signals and profile content."""
+    """
+    Create a keyword alignment plan from JD signals and profile content.
+
+    All JD keywords are passed forward to the AI. ``is_supported`` is metadata
+    for labeling prompt terms as confirmed or aspirational, not a filter for
+    whether the term gets planned.
+    """
+    parsed_jd = sanitize_parsed_jd(parsed_jd)
     strategy = build_resume_strategy(parsed_jd, profile)
-    priority_keywords = _priority_keywords(parsed_jd, emphasis)
-    must_include_skills = _dedupe(
+    evidence = build_candidate_evidence(profile, recommendation=current_draft)
+    
+    title_decision = choose_honest_target_title(
+        parsed_jd,
+        profile,
+        requested_title=_clean_title(parsed_jd.job_title) or _fallback_title(profile),
+    )
+    
+    # ── Requirement Planning ────────────────────────────────────────────
+    requirement_plan: list[PlannedRequirement] = []
+    must_include_skills: list[str] = []
+    must_include_tools: list[str] = []
+    must_include_resps: list[str] = []
+
+    for req in parsed_jd.requirements:
+        is_supported = evidence.supports(req.text) or any(evidence.supports(s) for s in req.synonyms)
+        
+        # Default placements based on category if LLM didn't provide them
+        placements = req.suggested_placement
+        if not placements:
+            if req.category == "technical_skill":
+                placements = [RequirementPlacement.SKILLS, RequirementPlacement.EXPERIENCE]
+            elif req.category == "soft_skill":
+                placements = [RequirementPlacement.SUMMARY, RequirementPlacement.EXPERIENCE]
+            elif req.category == "experience":
+                placements = [RequirementPlacement.EXPERIENCE]
+            elif req.category == "education":
+                placements = [RequirementPlacement.EDUCATION]
+            else:
+                placements = [RequirementPlacement.EXPERIENCE]
+
+        planned = PlannedRequirement(
+            text=req.text,
+            priority=req.priority,
+            placement=placements,
+            is_supported=is_supported,
+            synonyms=req.synonyms,
+        )
+        requirement_plan.append(planned)
+
+        # Populate legacy fields for backward compatibility. Support status is
+        # metadata only; unsupported/adjacent terms are labeled later.
+        if req.category == "technical_skill":
+            must_include_skills.append(req.text)
+        elif req.category == "tooling":
+            must_include_tools.append(req.text)
+        elif req.category == "responsibility":
+            must_include_resps.append(req.text)
+
+    # ── Legacy Keyword Fallbacks ────────────────────────────────────────
+    priority_keywords = _priority_keywords(parsed_jd, emphasis, title_decision.title)
+    
+    must_include_skills = clean_keyword_terms(list(parsed_jd.required_skills))[:35]
+    must_include_tools = clean_keyword_terms(list(parsed_jd.tools_platforms))[:30]
+    must_include_resps = _dedupe(list(parsed_jd.responsibilities[:10]))
+
+    missing = _missing_from_draft(priority_keywords, current_draft) if current_draft else []
+
+    return ATSKeywordPlannerOutput(
+        target_resume_title=title_decision.title,
+        candidate_seniority=title_decision.timeline.candidate_seniority.value,
+        seniority_adjusted=title_decision.adjusted,
+        seniority_warnings=title_decision.warnings,
+        priority_keywords=priority_keywords,
+        must_include_skills=_dedupe(must_include_skills),
+        must_include_tools_platforms=_dedupe(must_include_tools),
+        must_include_responsibilities=_dedupe(must_include_resps),
+        requirement_plan=requirement_plan,
+        suggested_section_ordering=strategy.section_order or _section_order(profile, target_pages),
+        suggested_summary_themes=_summary_themes(parsed_jd, priority_keywords, title_decision.title, requirement_plan),
+        suggested_project_emphasis=_project_emphasis(profile.projects, priority_keywords, must_include_resps),
+        missing_jd_keywords_from_current_draft=missing,
+        resume_style_guidance=_style_guidance(target_pages),
+    )
+
+
+def _priority_keywords(parsed_jd: ParsedJD, emphasis: str | None, target_title: str) -> list[str]:
+    skill_terms = clean_keyword_terms(
         [
             *parsed_jd.required_skills,
             *parsed_jd.programming_languages,
             *parsed_jd.frameworks,
             *parsed_jd.databases,
             *parsed_jd.cloud_devops_tools,
+            *parsed_jd.tools_platforms,
             *parsed_jd.domain_platform_terms,
+            *parsed_jd.deployment_environment_terms,
             *parsed_jd.mobile_platform_terms,
             *parsed_jd.preferred_skills,
         ]
-    )[:35]
-    must_include_tools = _dedupe(
-        [
-            *parsed_jd.tools_platforms,
-            *parsed_jd.cloud_devops_tools,
-            *parsed_jd.databases,
-            *parsed_jd.deployment_environment_terms,
-            *parsed_jd.domain_platform_terms,
-        ]
-    )[:30]
-    must_include_responsibilities = _dedupe(
-        [*parsed_jd.responsibilities, *[req.text for req in parsed_jd.requirements]]
-    )[:25]
-    missing = _missing_from_draft(priority_keywords, current_draft) if current_draft else []
-
-    return ATSKeywordPlannerOutput(
-        target_resume_title=_clean_title(parsed_jd.job_title) or _fallback_title(profile),
-        priority_keywords=priority_keywords,
-        must_include_skills=must_include_skills,
-        must_include_tools_platforms=must_include_tools,
-        must_include_responsibilities=must_include_responsibilities,
-        suggested_section_ordering=strategy.section_order or _section_order(profile, target_pages),
-        suggested_summary_themes=_summary_themes(parsed_jd, priority_keywords),
-        suggested_project_emphasis=_project_emphasis(profile.projects, priority_keywords, must_include_responsibilities),
-        missing_jd_keywords_from_current_draft=missing,
-        resume_style_guidance=_style_guidance(target_pages),
     )
-
-
-def _priority_keywords(parsed_jd: ParsedJD, emphasis: str | None) -> list[str]:
     values: list[str] = [
-        parsed_jd.job_title,
-        *parsed_jd.required_skills,
-        *parsed_jd.programming_languages,
-        *parsed_jd.frameworks,
-        *parsed_jd.databases,
-        *parsed_jd.cloud_devops_tools,
-        *parsed_jd.tools_platforms,
-        *parsed_jd.domain_platform_terms,
-        *parsed_jd.deployment_environment_terms,
-        *parsed_jd.mobile_platform_terms,
+        target_title,
+        *skill_terms,
         *parsed_jd.responsibilities,
-        *[req.text for req in parsed_jd.requirements if req.is_required],
+        *[req.text for req in parsed_jd.requirements if req.priority == RequirementPriority.MUST_HAVE],
         *[keyword.keyword for keyword in parsed_jd.keywords if keyword.importance in {"critical", "high"}],
-        *parsed_jd.preferred_skills,
         *parsed_jd.important_exact_phrases,
     ]
     if emphasis:
@@ -82,17 +134,22 @@ def _priority_keywords(parsed_jd: ParsedJD, emphasis: str | None) -> list[str]:
     return _dedupe(value for value in values if value)[:60]
 
 
-def _summary_themes(parsed_jd: ParsedJD, priority_keywords: list[str]) -> list[str]:
+def _summary_themes(parsed_jd: ParsedJD, priority_keywords: list[str], target_title: str, plan: list[PlannedRequirement]) -> list[str]:
     themes = [
-        f"Lead with the target title {parsed_jd.job_title}.",
-        "Mention the highest-priority JD skills early in the summary.",
+        f"Lead with the target title {target_title}.",
+        "Mention the highest-priority supported JD skills early in the summary.",
     ]
+    
+    supported_must_haves = [r.text for r in plan if r.priority == RequirementPriority.MUST_HAVE and r.is_supported]
+    if supported_must_haves:
+        themes.append(f"Highlight expertise in {', '.join(supported_must_haves[:3])} to demonstrate core alignment.")
+
+    if target_title != parsed_jd.job_title:
+        themes.append("Use the credibility-adjusted target title without restoring unsupported seniority.")
     if parsed_jd.domain_platform_terms:
         themes.append(f"Use domain terms such as {', '.join(parsed_jd.domain_platform_terms[:4])}.")
     if parsed_jd.cloud_devops_tools:
         themes.append(f"Include DevOps/tooling terms such as {', '.join(parsed_jd.cloud_devops_tools[:4])}.")
-    if parsed_jd.mobile_platform_terms:
-        themes.append(f"Include mobile/platform terms such as {', '.join(parsed_jd.mobile_platform_terms[:4])}.")
     if priority_keywords:
         themes.append(f"Prioritize exact phrases: {', '.join(priority_keywords[:8])}.")
     return themes[:8]
@@ -155,6 +212,10 @@ def _missing_from_draft(priority_keywords: list[str], draft: ResumeRecommendatio
 
 
 def _contains_keyword(keyword: str, normalized_corpus: str) -> bool:
+    return any(_contains_keyword_exact(form, normalized_corpus) for form in get_all_forms(keyword))
+
+
+def _contains_keyword_exact(keyword: str, normalized_corpus: str) -> bool:
     normalized = _normalize(keyword)
     if not normalized:
         return False

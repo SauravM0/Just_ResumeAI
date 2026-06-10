@@ -2,29 +2,36 @@ import { NavLink } from 'react-router-dom';
 import { useAppStore } from '../../store/useAppStore';
 
 const navItems = [
-  { to: '/dashboard', label: 'Home', icon: '⌂' },
-  { to: '/profile', label: 'Profile', icon: '👤' },
-  { to: '/jd', label: 'New', icon: '📄' },
-  { to: '/history', label: 'History', icon: '⏱' },
-  { to: '/settings', label: 'Settings', icon: '⚙' },
+  { to: '/dashboard', label: 'Home', icon: 'H' },
+  { to: '/profile', label: 'Profile', icon: 'P' },
+  { to: '/create-resume', label: 'New', icon: '+' },
+  { to: '/history', label: 'Runs', icon: 'R' },
+  { to: '/settings', label: 'Settings', icon: 'S' },
 ];
 
 export default function MobileNav() {
   const { generationId } = useAppStore();
   const items = generationId
-    ? [...navItems, { to: `/review/${generationId}`, label: 'Editor', icon: '✏️' }]
+    ? [
+        { to: '/dashboard', label: 'Home', icon: 'H' },
+        { to: '/profile', label: 'Profile', icon: 'P' },
+        { to: '/create-resume', label: 'New', icon: '+' },
+        { to: `/review/${generationId}`, label: 'Review', icon: 'E' },
+        { to: '/history', label: 'Runs', icon: 'R' },
+      ]
     : navItems;
 
   return (
-    <nav className="mobile-bottom-nav">
-      {items.slice(0, 6).map((item) => (
+    <nav className="mobile-bottom-nav" aria-label="Mobile navigation">
+      {items.map((item) => (
         <NavLink
           key={item.to}
           to={item.to}
           end={item.to === '/dashboard'}
+          aria-label={item.label}
           className={({ isActive }) => `mobile-nav-item ${isActive ? 'active' : ''}`}
         >
-          <span className="mobile-nav-icon">{item.icon}</span>
+          <span className="mobile-nav-icon" aria-hidden="true">{item.icon}</span>
           <span className="mobile-nav-label">{item.label}</span>
         </NavLink>
       ))}

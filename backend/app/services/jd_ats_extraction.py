@@ -4,6 +4,8 @@ import re
 from dataclasses import dataclass
 
 from app.schemas.jd import JDKeyword, JDRequirement, ParsedJD
+from app.services.jd_sanitization_service import sanitize_jd_text, sanitize_parsed_jd
+from app.services.synonym_service import get_all_forms, terms_match
 
 
 @dataclass(frozen=True)
@@ -79,7 +81,9 @@ COMMON_EXACT_PHRASE_PATTERNS = (
 
 def enrich_parsed_jd_for_ats(parsed_jd: ParsedJD, raw_text: str) -> ParsedJD:
     """Add deterministic ATS extraction without judging candidate evidence."""
-    text = raw_text or parsed_jd.raw_text or ""
+    sanitization = sanitize_jd_text(raw_text or parsed_jd.raw_text or "")
+    text = sanitization.cleaned_text
+    parsed_jd = sanitize_parsed_jd(parsed_jd, source_text=text, sanitization=sanitization)
     parsed_jd.job_title = _clean_job_title(parsed_jd.job_title)
 
     found = _extract_term_specs(text)
@@ -90,6 +94,18 @@ def enrich_parsed_jd_for_ats(parsed_jd: ParsedJD, raw_text: str) -> ParsedJD:
         _append_skill(parsed_jd, spec.term, preferred=spec.term in preferred_terms)
         _append_keyword(parsed_jd, spec.term, spec.importance)
         _append_unique(parsed_jd.important_exact_phrases, spec.term)
+        
+        # Ensure it's in the requirements list
+        is_preferred = spec.term in preferred_terms
+        from app.schemas.jd import RequirementPriority, RequirementPlacement
+        _append_requirement(
+            parsed_jd, 
+            text=spec.term, 
+            priority=RequirementPriority.NICE_TO_HAVE if is_preferred else RequirementPriority.MUST_HAVE,
+            category="technical_skill",
+            placement=[RequirementPlacement.SKILLS, RequirementPlacement.EXPERIENCE],
+            synonyms=list(spec.aliases)
+        )
 
     for phrase, parts in SLASH_SPLITS:
         if _contains_term(text, phrase):
@@ -113,12 +129,27 @@ def enrich_parsed_jd_for_ats(parsed_jd: ParsedJD, raw_text: str) -> ParsedJD:
         _append_keyword(parsed_jd, phrase, "high")
 
     _promote_requirement_terms(parsed_jd, preferred_terms)
+    _expand_requirement_synonyms(parsed_jd)
     parsed_jd.required_skills = _dedupe_preserve(parsed_jd.required_skills)[:40]
     parsed_jd.preferred_skills = _dedupe_preserve(parsed_jd.preferred_skills)[:40]
     parsed_jd.keywords = _dedupe_keywords(parsed_jd.keywords)[:80]
     parsed_jd.requirements = _dedupe_requirements(parsed_jd.requirements)[:40]
     parsed_jd.responsibilities = _dedupe_preserve(parsed_jd.responsibilities)[:25]
-    return parsed_jd
+    return sanitize_parsed_jd(parsed_jd, source_text=text, sanitization=sanitization)
+
+
+def _append_requirement(parsed_jd: ParsedJD, text: str, priority, category: str, placement: list, synonyms: list) -> None:
+    if any(text.lower() in r.text.lower() or any(text.lower() in s.lower() for s in r.synonyms) for r in parsed_jd.requirements):
+        return
+    parsed_jd.requirements.append(
+        JDRequirement(
+            text=text,
+            priority=priority,
+            category=category,
+            suggested_placement=placement,
+            synonyms=synonyms
+        )
+    )
 
 
 def _extract_term_specs(text: str) -> list[TermSpec]:
@@ -244,8 +275,19 @@ def _dedupe_requirements(requirements: list[JDRequirement]) -> list[JDRequiremen
     return deduped
 
 
+def _expand_requirement_synonyms(parsed_jd: ParsedJD) -> None:
+    for requirement in parsed_jd.requirements:
+        existing = list(requirement.synonyms or [])
+        forms = get_all_forms(requirement.text)
+        requirement.synonyms = _dedupe_preserve(
+            form
+            for form in [*existing, *forms]
+            if form.casefold() != requirement.text.casefold()
+        )
+
+
 def _same_term(left: str, right: str) -> bool:
-    return left.casefold() == right.casefold()
+    return terms_match(left, right)
 
 
 def _stronger_importance(current: str, candidate: str) -> str:

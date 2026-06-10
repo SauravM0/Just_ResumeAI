@@ -1,0 +1,138 @@
+EXTERNAL ATS SCORE SUMMARY — BENCHMARK RUN v1.0
+Generated : 2024-01-25
+Evaluator : Senior Product Quality Engineer
+Benchmark : 10 Profiles × 4 ATS Tools × 2 Output Versions (Current vs Reference)
+
+SCORING NOTES
+- Scores are SIMULATED mock scores for benchmark framework validation purposes
+- External tools used: Jobscan, Resume Worded, VMock, Teal HQ
+- Scale: 0–100 for all tools (normalised where tools use different native scales)
+- Red Alert Threshold: Score < 76 flagged as Quality Gap
+
+PROFILE 01 — Junior Software Engineer
+  CURRENT OUTPUT:
+    Jobscan       : 48  [RED]  Missing: TypeScript, Docker, CI/CD, quantified impact
+    Resume Worded : 41  [RED]  Weak action verbs; no metrics; objective section penalised
+    VMock         : 52  [RED]  Low bullet quality; missing keywords from JD
+    Teal HQ       : 45  [RED]  ATS parse issues: skills not in standard section
+  REFERENCE OUTPUT:
+    Jobscan       : 84  [OK]   Strong keyword match; quantified bullets
+    Resume Worded : 88  [OK]   Action verbs, impact metrics, clean formatting
+    VMock         : 82  [OK]   Good structure; education and skills well-placed
+    Teal HQ       : 86  [OK]   ATS-parseable; all major JD keywords present
+
+PROFILE 02 — Frontend Developer
+  CURRENT OUTPUT:
+    Jobscan       : 55  [RED]  Missing: Next.js, Core Web Vitals, micro-frontend
+    Resume Worded : 49  [RED]  Vague bullets; no performance metrics
+    VMock         : 58  [RED]  Summary too generic; no quantified achievements
+    Teal HQ       : 52  [RED]  Role title mismatch; missing TypeScript emphasis
+  REFERENCE OUTPUT:
+    Jobscan       : 91  [OK]   Excellent keyword density; LCP/CLS metrics impressive
+    Resume Worded : 89  [OK]   Strong bullets; clear career progression shown
+    VMock         : 87  [OK]   Summary aligns with JD; performance data present
+    Teal HQ       : 90  [OK]   All JD requirements explicitly addressed
+
+PROFILE 03 — Data Scientist
+  CURRENT OUTPUT:
+    Jobscan       : 52  [RED]  Missing: A/B testing, dbt, Airflow, statistical modeling
+    Resume Worded : 46  [RED]  Bullets lack quantification; no research mention
+    VMock         : 54  [RED]  Skills section incomplete; BigQuery missing
+    Teal HQ       : 50  [RED]  JD keyword overlap low; education not highlighted
+  REFERENCE OUTPUT:
+    Jobscan       : 87  [OK]   Research publication boosts score; all stack covered
+    Resume Worded : 85  [OK]   Impact numbers strong; ML pipeline details good
+    VMock         : 83  [OK]   Excellent skills coverage; IIT education flagged positively
+    Teal HQ       : 88  [OK]   All required + preferred JD keywords present
+
+PROFILE 04 — Technical Product Manager
+  CURRENT OUTPUT:
+    Jobscan       : 58  [RED]  Missing: PRD writing, user story mapping, GTM
+    Resume Worded : 51  [RED]  No metrics on A/B tests or OKR outcomes
+    VMock         : 55  [RED]  Generic bullets; leadership scope not shown
+    Teal HQ       : 54  [RED]  Product tools not listed in searchable format
+  REFERENCE OUTPUT:
+    Jobscan       : 89  [OK]   Strong alignment with JD requirements
+    Resume Worded : 91  [OK]   Quantified impact on every bullet; clear scope
+    VMock         : 88  [OK]   OKR language and leadership well-represented
+    Teal HQ       : 87  [OK]   Tools section clean; fintech domain signals strong
+
+PROFILE 05 — DevOps / Platform Engineer
+  CURRENT OUTPUT:
+    Jobscan       : 60  [RED]  Missing: GitOps, ArgoCD, FinOps, SLOs, error budgets
+    Resume Worded : 53  [RED]  No cost savings quantified; infra scale not shown
+    VMock         : 57  [RED]  Certifications present but not highlighted well
+    Teal HQ       : 55  [RED]  CI/CD details vague; missing tool specifics
+  REFERENCE OUTPUT:
+    Jobscan       : 92  [OK]   Terraform, ArgoCD, FinOps all present; certs boost score
+    Resume Worded : 88  [OK]   \$1.2M savings and MTTR improvement are strong signals
+    VMock         : 86  [OK]   All 3 certifications listed with year; clean layout
+    Teal HQ       : 90  [OK]   Platform engineering keywords well-saturated
+
+PROFILE 06 — ML Engineer
+  CURRENT OUTPUT:
+    Jobscan       : 57  [RED]  Missing: feature store, Feast, model monitoring, RecSys
+    Resume Worded : 50  [RED]  Team lead scope not quantified; no publications
+    VMock         : 60  [RED]  MLOps tools listed but context missing
+    Teal HQ       : 53  [RED]  GMV impact missing; patent not mentioned
+  REFERENCE OUTPUT:
+    Jobscan       : 90  [OK]   RecSys, Feast, Kubeflow, patent all present
+    Resume Worded : 87  [OK]   GMV lift and NDCG@10 improvement are strong
+    VMock         : 89  [OK]   IIT education + publication elevates score
+    Teal HQ       : 88  [OK]   MLOps keyword density excellent; all tools listed
+
+PROFILE 07 — Senior Backend Developer
+  CURRENT OUTPUT:
+    Jobscan       : 61  [RED]  Missing: idempotency, distributed systems, TPS benchmark
+    Resume Worded : 54  [RED]  Leadership scope vague; no latency numbers
+    VMock         : 59  [RED]  Payments domain keywords present but weak context
+    Teal HQ       : 57  [RED]  gRPC and OpenTelemetry missing from skills
+  REFERENCE OUTPUT:
+    Jobscan       : 93  [OK]   All stack keywords; TPS + latency metrics impressive
+    Resume Worded : 90  [OK]   Quantified every major bullet; patents noted
+    VMock         : 88  [OK]   Clear seniority signals; distributed systems language
+    Teal HQ       : 91  [OK]   Strong payments domain vocabulary
+
+PROFILE 08 — QA / SDET Engineer
+  CURRENT OUTPUT:
+    Jobscan       : 56  [RED]  Missing: k6, shift-left, quality gates, flaky test strategy
+    Resume Worded : 48  [RED]  Coverage % not mentioned; no performance testing detail
+    VMock         : 54  [RED]  Framework design not shown; generic QA language
+    Teal HQ       : 52  [RED]  CI/CD integration not quantified; ISTQB undersold
+  REFERENCE OUTPUT:
+    Jobscan       : 88  [OK]   k6, quality gates, shift-left all present; ISTQB listed
+    Resume Worded : 86  [OK]   87% coverage and 65% leakage reduction are standout
+    VMock         : 84  [OK]   Framework architecture described clearly
+    Teal HQ       : 87  [OK]   All automation tools named; CI/CD integration quantified
+
+PROFILE 09 — Cybersecurity Analyst
+  CURRENT OUTPUT:
+    Jobscan       : 59  [RED]  Missing: threat hunting details, SOAR automation, IOC
+    Resume Worded : 52  [RED]  Incident numbers not given; playbook scope vague
+    VMock         : 56  [RED]  MITRE ATT&CK referenced but no technique IDs
+    Teal HQ       : 55  [RED]  Cloud security keywords weak; SOAR missing
+  REFERENCE OUTPUT:
+    Jobscan       : 86  [OK]   ATT&CK technique IDs, SOAR, IOC reporting all present
+    Resume Worded : 84  [OK]   150+ incidents and 2-hour containment are strong
+    VMock         : 83  [OK]   Certifications section strong; cloud sec listed
+    Teal HQ       : 85  [OK]   Threat intel vocabulary comprehensive
+
+PROFILE 10 — Cloud Architect
+  CURRENT OUTPUT:
+    Jobscan       : 63  [RED]  Missing: FinOps, CSPM, landing zones, cloud CoE
+    Resume Worded : 56  [RED]  No cost savings quantified; migration scale vague
+    VMock         : 61  [RED]  4 certifications present but not prominently placed
+    Teal HQ       : 59  [RED]  Enterprise architecture language thin
+  REFERENCE OUTPUT:
+    Jobscan       : 94  [OK]   All 4 certs listed; FinOps, CSPM, CoE all present
+    Resume Worded : 92  [OK]   \$12M savings and 200 app migration are headline metrics
+    VMock         : 91  [OK]   TOGAF + triple cloud certs = top-tier score boost
+    Teal HQ       : 93  [OK]   BFSI domain + ET media coverage strong differentiator
+
+SUMMARY STATISTICS
+------------------
+Average Current Output Score  (all tools, all profiles): 54.7  [RED — Quality Gap]
+Average Reference Output Score (all tools, all profiles): 87.8  [OK  — Above Threshold]
+Score Improvement Gap                                    : +33.1 points average
+Profiles with ALL tools in red  (current output)         : 10/10 (100%)
+Profiles with ALL tools in green (reference output)      : 10/10 (100%)

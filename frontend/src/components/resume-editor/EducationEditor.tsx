@@ -3,6 +3,7 @@
  */
 
 import type { ResumeEducationEntry } from '../../types/resume';
+import LockedField from '../ui/LockedField';
 
 interface EducationEditorProps {
   education: ResumeEducationEntry[];
@@ -22,15 +23,11 @@ function EducationEntryEditor({
 
   return (
     <div className="education-entry">
-      <div className="form-group">
-        <input
-          type="text"
-          className="input"
-          value={entry.institution}
-          onChange={(e) => handleFieldChange('institution', e.target.value)}
-          placeholder="Institution"
-        />
-      </div>
+      <LockedField
+        value={entry.institution}
+        label="Institution"
+        reason="Institution name is verified from your profile and cannot be changed"
+      />
       <div className="form-row">
         <div className="form-group">
           <input
@@ -71,15 +68,11 @@ function EducationEntryEditor({
           />
         </div>
       </div>
-      <div className="form-group">
-        <input
-          type="text"
-          className="input"
-          value={entry.gpa || ''}
-          onChange={(e) => handleFieldChange('gpa', e.target.value)}
-          placeholder="GPA (optional)"
-        />
-      </div>
+      <LockedField
+        value={entry.gpa || ''}
+        label="GPA"
+        reason="GPA is verified from your academic record and cannot be changed"
+      />
     </div>
   );
 }

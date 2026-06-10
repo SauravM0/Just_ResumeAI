@@ -47,6 +47,7 @@ _ALLOWED_BULLET_STATUSES = {
     BulletStatus.ACCEPTED,
     BulletStatus.EDITED,
     BulletStatus.LOCKED,
+    BulletStatus.NEEDS_REPAIR,
     BulletStatus.PENDING,
 }
 

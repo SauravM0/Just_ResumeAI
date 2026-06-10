@@ -4,7 +4,14 @@
 
 output/
 output/**
+tmp/
+tmp/**
+temp/
+temp/**
+uploads/
+uploads/**
 *.sqlite3
+*.db
 __pycache__
 **/__pycache__
 *.pyc
@@ -15,12 +22,14 @@ __pycache__
 .coverage
 coverage
 logs/
+*.log
 
 .git
 .gitignore
 Dockerfile
 README.md
 DEPLOYMENT.md
+docs/
 
 # LaTeX build artifacts
 *.aux
@@ -31,6 +40,11 @@ DEPLOYMENT.md
 *.tex
 !templates/latex/*.tex
 *.docx
+
+# Stray/artifact files
+package-lock.json
+package.json
+nul
 
 # OS files
 .DS_Store

@@ -11,6 +11,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from .validation import ValidationStatus
+
 
 # ─── Enums ───────────────────────────────────────────────────────────────────
 
@@ -37,12 +39,36 @@ class SeniorityLevel(str, Enum):
 
 # ─── Parsed JD Structure ────────────────────────────────────────────────────
 
+class RequirementPriority(str, Enum):
+    MUST_HAVE = "must-have"
+    SHOULD_HAVE = "should-have"
+    NICE_TO_HAVE = "nice-to-have"
+
+
+class RequirementPlacement(str, Enum):
+    SUMMARY = "summary"
+    SKILLS = "skills"
+    EXPERIENCE = "experience"
+    PROJECTS = "projects"
+    EDUCATION = "education"
+    ACHIEVEMENTS = "achievements"
+
+
 class JDRequirement(BaseModel):
     """A single extracted requirement from the JD."""
     text: str
-    is_required: bool = True  # True = must-have, False = nice-to-have
+    is_required: bool = True  # Legacy field, kept for compatibility
+    priority: RequirementPriority = RequirementPriority.MUST_HAVE
     category: Optional[str] = Field(
         None, description="e.g. 'technical_skill', 'soft_skill', 'experience', 'education'"
+    )
+    suggested_placement: list[RequirementPlacement] = Field(
+        default_factory=list,
+        description="Where this requirement should ideally appear in the resume"
+    )
+    synonyms: list[str] = Field(
+        default_factory=list,
+        description="Alternative names or synonyms for this requirement"
     )
 
 
@@ -107,3 +133,7 @@ class JDAnalyzeResponse(BaseModel):
     generation_id: str = Field(..., description="Persistent Supabase generation ID")
     parsed_jd: ParsedJD
     warnings: list[str] = Field(default_factory=list)
+    validation_status: ValidationStatus = Field(
+        default_factory=ValidationStatus,
+        description="Standard validation status for JD intake.",
+    )

@@ -65,11 +65,23 @@ python -m compileall app/ tests/ -q && pass "compileall app" || fail "compileall
 pip install ruff -q 2>/dev/null || true
 ruff check app/ tests/ && pass "ruff lint" || fail "ruff lint"
 
-# pytest
-python -m pytest tests/ -v --tb=short && pass "pytest" || fail "pytest"
+# pytest (SKIP_SECRETS=1 disables tests that require real API keys)
+SKIP_SECRETS=1 python -m pytest tests/ -v --tb=short -k 'not integration and not e2e' && pass "pytest" || fail "pytest"
 
 # import check
 python -c "from app.main import app; print('  imports OK')" && pass "app imports" || fail "app imports"
+
+# test that the new conftest fixtures can be imported without real API keys
+python -c "
+from tests.conftest import (
+    messy_jd_text, messy_parsed_jd,
+    senior_jd, fresher_profile,
+    clean_profile, missing_skills_profile,
+    truncated_bullets_resume, recommendation,
+    clean_jd, mid_profile, kubernetes_claim_resume,
+)
+print('  All fixtures import OK')
+" && pass "fixture imports" || fail "fixture imports"
 
 # ── Frontend checks ──────────────────────────────────────────
 SECTION="frontend"

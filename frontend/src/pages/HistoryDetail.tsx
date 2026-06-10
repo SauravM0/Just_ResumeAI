@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useMutation } from '@tanstack/react-query';
-import { getHistoryDetail, updateHistory, type HistoryDetail } from '../lib/historyApi';
+import { getHistoryDetail, updateHistory, deleteHistory, type HistoryDetail } from '../lib/historyApi';
 import { exportPdf, exportDocx, regenerateExportFile } from '../lib/api';
 import ResumeVisualEditor from '../components/resume-editor/ResumeVisualEditor';
 import ATSCompactScoreCard from '../components/ATSCompactScoreCard';
@@ -19,11 +19,11 @@ function downloadExport(file: ExportFileResponse) {
   document.body.appendChild(link);
   link.click();
   link.remove();
-  URL.revokeObjectURL(url);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 export default function HistoryDetailPage() {
-  const { generationId } = useParams<{ generationId: string }>();
+  const { id: generationId } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [detail, setDetail] = useState<HistoryDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -31,6 +31,8 @@ export default function HistoryDetailPage() {
   const [exportedPdf, setExportedPdf] = useState<ExportFileResponse | null>(null);
   const [exportedDocx, setExportedDocx] = useState<ExportFileResponse | null>(null);
   const [showJd, setShowJd] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deletingGen, setDeletingGen] = useState(false);
 
   useEffect(() => {
     if (!generationId) return;
@@ -79,7 +81,7 @@ export default function HistoryDetailPage() {
         resume_json: updated,
         status: 'completed',
       });
-      setDetail(prev => prev ? { ...prev, resume_json: updated } : prev);
+      setDetail(prev => prev ? { ...prev, resume_json: updated, ats_score_json: null } : prev);
     } catch (e) {
       console.error('Failed to save:', e);
     }
@@ -108,6 +110,7 @@ export default function HistoryDetailPage() {
 
   const resumeJson = detail.resume_json as ResumeRecommendation | null;
   const atsScoreJson = detail.ats_score_json as ATSScore | null;
+  const hasDocxFallback = Boolean(detail.docx_fallback_path || detail.pdf_compile_error);
 
   const getExpiryStatus = () => {
     if (!detail?.file_expiry_info?.has_files) return null;
@@ -151,6 +154,18 @@ export default function HistoryDetailPage() {
         </div>
       )}
 
+      {detail.status === 'completed' && hasDocxFallback && (
+        <div className="warning-banner warning-info">
+          <span>DOCX</span>
+          <div>
+            <strong>Word document fallback available</strong>
+            <p style={{ margin: 0, marginTop: '2px', fontSize: '0.8rem' }}>
+              PDF generation had a formatting issue, but the resume completed successfully as an editable DOCX.
+            </p>
+          </div>
+        </div>
+      )}
+
       <div
         className="action-bar"
         style={{
@@ -165,7 +180,12 @@ export default function HistoryDetailPage() {
         }}
       >
         {atsScoreJson && (
-          <ATSCompactScoreCard atsScore={atsScoreJson} alignmentReport={null} compact />
+          <ATSCompactScoreCard 
+            atsScore={atsScoreJson} 
+            alignmentReport={null} 
+            resumeVersionId={resumeJson?.version_id}
+            compact 
+          />
         )}
 
         <div className="action-bar-actions">
@@ -206,7 +226,7 @@ export default function HistoryDetailPage() {
                   onClick={() => generationId && pdfExportMutation.mutate(generationId)}
                   disabled={pdfExportMutation.isPending}
                 >
-                  {pdfExportMutation.isPending ? 'Exporting...' : 'Export PDF'}
+                  {pdfExportMutation.isPending ? 'Exporting...' : hasDocxFallback ? 'Retry PDF Export' : 'Export PDF'}
                 </button>
               )}
 
@@ -220,7 +240,7 @@ export default function HistoryDetailPage() {
                   onClick={() => generationId && docxExportMutation.mutate(generationId)}
                   disabled={docxExportMutation.isPending}
                 >
-                  {docxExportMutation.isPending ? 'Exporting...' : 'Export DOCX'}
+                  {docxExportMutation.isPending ? 'Exporting...' : hasDocxFallback ? 'Download DOCX Fallback' : 'Export DOCX'}
                 </button>
               )}
             </>
@@ -236,11 +256,70 @@ export default function HistoryDetailPage() {
             </button>
           )}
 
+          <button
+            className="btn btn-danger btn-sm"
+            onClick={() => setShowDeleteConfirm(true)}
+            disabled={deletingGen}
+          >
+            {deletingGen ? 'Deleting...' : 'Delete'}
+          </button>
+
           <button className="btn btn-ghost btn-sm" onClick={() => navigate('/history')}>
             Back
           </button>
         </div>
       </div>
+
+      {/* Delete confirmation */}
+      {showDeleteConfirm && (
+        <div
+          className="sidebar-overlay open"
+          style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 200 }}
+          onClick={() => setShowDeleteConfirm(false)}
+        >
+          <div
+            className="card"
+            style={{
+              width: 'min(400px, calc(100vw - 32px))',
+              padding: 'var(--space-xl)',
+              textAlign: 'center',
+            }}
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Confirm deletion"
+          >
+            <div style={{ fontSize: '2.5rem', marginBottom: 'var(--space-md)' }}>🗑️</div>
+            <h3 style={{ margin: '0 0 var(--space-xs)' }}>Delete this generation?</h3>
+            <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', margin: '0 0 var(--space-lg)' }}>
+              This will archive the generation. You can still regenerate from your profile data.
+            </p>
+            <div style={{ display: 'flex', gap: 'var(--space-sm)', justifyContent: 'center' }}>
+              <button className="btn btn-ghost btn-sm" onClick={() => setShowDeleteConfirm(false)}>
+                Cancel
+              </button>
+              <button
+                className="btn btn-danger btn-sm"
+                onClick={async () => {
+                  if (!generationId) return;
+                  setDeletingGen(true);
+                  try {
+                    await deleteHistory(generationId);
+                    navigate('/history');
+                  } catch (e) {
+                    console.error('Delete failed:', e);
+                    setDeletingGen(false);
+                    setShowDeleteConfirm(false);
+                  }
+                }}
+                disabled={deletingGen}
+              >
+                {deletingGen ? 'Deleting...' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showJd && detail.raw_jd_text && (
         <AppCard title="Original Job Description" actions={
@@ -272,6 +351,18 @@ export default function HistoryDetailPage() {
               {expiryStatus.canRegenerate
                 ? 'Your exported files have expired. You can refresh them to get new download links.'
                 : 'Your exported files have expired and cannot be refreshed. Export the resume again.'}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {exportedPdf?.compressed && (
+        <div className="warning-banner warning-info">
+          <span>PDF fit</span>
+          <div>
+            <strong>Compressed to {exportedPdf.page_count ?? 1} page{(exportedPdf.page_count ?? 1) === 1 ? '' : 's'}</strong>
+            <p style={{ margin: 0, marginTop: '2px', fontSize: '0.8rem' }}>
+              {(exportedPdf.compression_actions || []).slice(0, 3).join(' ') || 'Optional resume details were shortened while preserving factual anchors.'}
             </p>
           </div>
         </div>

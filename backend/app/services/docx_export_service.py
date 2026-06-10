@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from io import BytesIO
 from pathlib import Path
 
 from docx import Document
@@ -9,12 +10,58 @@ from docx.shared import Pt
 
 from app.config import get_settings
 from app.schemas.resume import BulletStatus, ResumeRecommendation
+from app.services.jd_sanitization_service import (
+    assert_render_text_safe,
+    assert_resume_recommendation_safe,
+    recommendation_to_plain_text,
+)
 from app.services.latex_render_service import sanitize_recommendation
+from app.utils.latex_escape import normalize_unicode_for_resume_export
+
+
+def export_recommendation_to_docx(recommendation: ResumeRecommendation) -> bytes:
+    """
+    Generate an ATS-safe DOCX from a ResumeRecommendation and return bytes.
+
+    This is used as a fallback when LaTeX/PDF compilation fails.
+    """
+    document = _build_docx_document(recommendation)
+    buffer = BytesIO()
+    document.save(buffer)
+    return buffer.getvalue()
 
 
 def export_resume_docx(recommendation: ResumeRecommendation, generation_id: str) -> str:
     """Generate a simple single-column DOCX respecting section_order."""
+    document = _build_docx_document(recommendation)
+    settings = get_settings()
+    output_dir = Path(settings.LATEX_OUTPUT_DIR)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"resume_{generation_id}_{uuid.uuid4().hex[:6]}.docx"
+    output_path = output_dir / filename
+    document.save(output_path)
+    return str(output_path)
+
+
+def _build_docx_document(recommendation: ResumeRecommendation) -> Document:
     rec = sanitize_recommendation(recommendation)
+    from app.services.resume_validation_gate import (
+        ResumeValidationError,
+        validate_resume_for_export,
+    )
+    try:
+        result = validate_resume_for_export(rec)
+        rec = result.recommendation
+    except ResumeValidationError:
+        # The endpoint already validates before calling this function.
+        # If we reach here with a fatal issue, re-raise so the caller
+        # can surface the validation error to the user.
+        raise
+    assert_resume_recommendation_safe(rec)
+    assert_render_text_safe(
+        recommendation_to_plain_text(rec),
+        artifact="recommendation_plain_text",
+    )
     document = Document()
     styles = document.styles
     styles["Normal"].font.name = "Arial"
@@ -29,18 +76,18 @@ def export_resume_docx(recommendation: ResumeRecommendation, generation_id: str)
     if rec.contact.full_name:
         name = document.add_paragraph()
         name.alignment = 1
-        run = name.add_run(rec.contact.full_name)
+        run = name.add_run(_clean(rec.contact.full_name))
         run.bold = True
         run.font.size = Pt(16)
 
     contact = " | ".join(
         part for part in [
-            rec.contact.email,
-            rec.contact.phone or "",
-            rec.contact.location or "",
-            rec.contact.linkedin_url or "",
-            rec.contact.github_url or "",
-            rec.contact.portfolio_url or "",
+            _clean(rec.contact.email),
+            _clean(rec.contact.phone),
+            _clean(rec.contact.location),
+            _clean(rec.contact.linkedin_url),
+            _clean(rec.contact.github_url),
+            _clean(rec.contact.portfolio_url),
         ] if part
     )
     if contact:
@@ -51,7 +98,7 @@ def export_resume_docx(recommendation: ResumeRecommendation, generation_id: str)
     if rec.target_title:
         paragraph = document.add_paragraph()
         paragraph.alignment = 1
-        paragraph.add_run(rec.target_title).bold = True
+        paragraph.add_run(_clean(rec.target_title)).bold = True
 
     section_order = rec.section_order if rec.section_order else [
         "summary", "education", "technical skills", "experience",
@@ -60,10 +107,10 @@ def export_resume_docx(recommendation: ResumeRecommendation, generation_id: str)
 
     for section_name in section_order:
         if section_name == "summary" and rec.summary:
-            _add_section(document, "Professional Summary")
+            _add_section(document, "Summary")
             document.add_paragraph(_clean(rec.summary))
         elif section_name in ("technical skills", "skills") and rec.skills:
-            _add_section(document, "Technical Skills")
+            _add_section(document, "Skills")
             for group in rec.skills:
                 if not group.skills:
                     continue
@@ -71,11 +118,11 @@ def export_resume_docx(recommendation: ResumeRecommendation, generation_id: str)
                 paragraph.add_run(f"{group.category}: ").bold = True
                 paragraph.add_run(", ".join(_clean(skill) for skill in group.skills if _clean(skill)))
         elif section_name == "experience" and rec.experience:
-            _add_section(document, "Professional Experience")
+            _add_section(document, "Experience")
             for exp in rec.experience:
                 if not exp.included or not exp.bullets:
                     continue
-                _add_heading_line(document, exp.title, exp.company, f"{exp.start_date} - {exp.end_date or 'Present'}")
+                _add_heading_line(document, exp.title, exp.company, _date_range(exp.start_date, exp.end_date or "Present"))
                 for bullet in exp.bullets:
                     _add_bullet(document, bullet)
         elif section_name == "projects":
@@ -89,7 +136,7 @@ def export_resume_docx(recommendation: ResumeRecommendation, generation_id: str)
             _add_section(document, "Certifications")
             for cert in rec.certifications:
                 if cert.included and cert.name:
-                    document.add_paragraph(" | ".join(part for part in [cert.name, cert.issuing_org or "", cert.date or ""] if part))
+                    document.add_paragraph(" | ".join(_clean(part) for part in [cert.name, cert.issuing_org or "", cert.date or ""] if _clean(part)))
 
     for section in rec.custom_sections:
         if section.included and section.items:
@@ -97,14 +144,7 @@ def export_resume_docx(recommendation: ResumeRecommendation, generation_id: str)
             for item in section.items:
                 if _clean(item):
                     document.add_paragraph(_clean(item), style="List Bullet")
-
-    settings = get_settings()
-    output_dir = Path(settings.LATEX_OUTPUT_DIR)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"resume_{generation_id}_{uuid.uuid4().hex[:6]}.docx"
-    output_path = output_dir / filename
-    document.save(output_path)
-    return str(output_path)
+    return document
 
 
 def _add_section(document: Document, title: str) -> None:
@@ -117,7 +157,7 @@ def _add_section(document: Document, title: str) -> None:
 def _add_heading_line(document: Document, title: str, subtitle: str, meta: str) -> None:
     paragraph = document.add_paragraph()
     paragraph.add_run(_clean(title)).bold = True
-    details = " | ".join(part for part in [subtitle, meta] if part)
+    details = " | ".join(_clean(part) for part in [subtitle, meta] if _clean(part))
     if details:
         paragraph.add_run(f" | {details}")
 
@@ -136,7 +176,7 @@ def _write_projects(document: Document, rec: ResumeRecommendation) -> None:
         for project in rec.projects:
             if not project.included or not project.bullets:
                 continue
-            tech = ", ".join(project.technologies)
+            tech = ", ".join(_clean(technology) for technology in project.technologies if _clean(technology))
             _add_heading_line(document, project.name, tech, "")
             for bullet in project.bullets:
                 _add_bullet(document, bullet)
@@ -148,7 +188,7 @@ def _write_education(document: Document, rec: ResumeRecommendation) -> None:
         for edu in rec.education:
             if not edu.included:
                 continue
-            line = " | ".join(part for part in [edu.degree, edu.field_of_study or "", edu.institution, f"CGPA/GPA: {edu.gpa}" if edu.gpa else ""] if part)
+            line = " | ".join(_clean(part) for part in [edu.degree, edu.field_of_study or "", edu.institution, f"CGPA/GPA: {edu.gpa}" if edu.gpa else ""] if _clean(part))
             if line:
                 document.add_paragraph(line)
 
@@ -158,11 +198,16 @@ def _write_achievements(document: Document, achievements) -> None:
         _add_section(document, "Achievements")
         for item in achievements:
             if item.included and item.title:
-                line = " | ".join(part for part in [item.title, item.issuer or "", item.date or ""] if part)
+                line = " | ".join(_clean(part) for part in [item.title, item.issuer or "", item.date or ""] if _clean(part))
                 document.add_paragraph(line)
                 if item.description:
                     document.add_paragraph(_clean(item.description), style="List Bullet")
 
 
+def _date_range(start_date: str | None, end_date: str | None) -> str:
+    return " to ".join(_clean(part) for part in [start_date, end_date] if _clean(part))
+
+
 def _clean(value: str | None) -> str:
+    value = normalize_unicode_for_resume_export(value)
     return re.sub(r"\s+", " ", value or "").strip(" -*•\t\r\n")

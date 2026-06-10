@@ -7,7 +7,7 @@ export default function QuickActions() {
 
   const handleNewResume = () => {
     resetGeneration();
-    navigate('/jd');
+    navigate('/create-resume');
   };
 
   const actions = [

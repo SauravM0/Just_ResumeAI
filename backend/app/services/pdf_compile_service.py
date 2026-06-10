@@ -16,6 +16,7 @@ import uuid
 from pathlib import Path
 
 from app.config import get_settings
+from app.services.resume_validation_gate import validate_latex_for_export
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +70,6 @@ class PDFCompileError(Exception):
 
 
 _BANNED_LATEX_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    (r"\\input\b", re.compile(r"\\input\b", re.IGNORECASE)),
     (r"\\include\b", re.compile(r"\\include\b", re.IGNORECASE)),
     (r"\\openin\b", re.compile(r"\\openin\b", re.IGNORECASE)),
     (r"\\openout\b", re.compile(r"\\openout\b", re.IGNORECASE)),
@@ -86,17 +86,39 @@ _BANNED_LATEX_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
 
 def _assert_safe_latex(latex_source: str) -> None:
     """Reject LaTeX that attempts file access, shell escape, or primitive I/O."""
-    matches = [
-        pattern_text
-        for pattern_text, pattern in _BANNED_LATEX_PATTERNS
-        if pattern.search(latex_source)
-    ]
+    if len(latex_source.encode("utf-8")) > 50_000:
+        logger.warning("latex_source.unusually_long bytes=%d", len(latex_source.encode("utf-8")))
+    first_match: tuple[str, re.Match[str]] | None = None
+    matches: list[str] = []
+    for pattern_text, pattern in _BANNED_LATEX_PATTERNS:
+        match = pattern.search(latex_source)
+        if not match:
+            continue
+        matches.append(pattern_text)
+        if first_match is None:
+            first_match = (pattern_text, match)
     if matches:
+        pattern_text, match = first_match or (matches[0], None)  # type: ignore[assignment]
+        excerpt = _sanitize_excerpt(_source_excerpt_around_match(latex_source, match)) if match else None
+        logger.warning(
+            "latex_source.unsafe pattern=%s all_patterns=%s excerpt=%s",
+            pattern_text,
+            matches,
+            excerpt,
+        )
         raise PDFCompileError(
             "Unsafe LaTeX detected",
             errors=["The LaTeX source contains a command that is not allowed for safe PDF compilation."],
+            pdflatex_excerpt=excerpt,
             raw_output="; ".join(f"Banned LaTeX pattern detected: {pattern}" for pattern in matches),
         )
+
+
+def _source_excerpt_around_match(latex_source: str, match: re.Match[str], radius: int = 160) -> str:
+    start = max(0, match.start() - radius)
+    end = min(len(latex_source), match.end() + radius)
+    excerpt = latex_source[start:end]
+    return re.sub(r"\s+", " ", excerpt).strip()[:400]
 
 
 def _assert_no_empty_itemize(latex_source: str) -> None:
@@ -157,6 +179,7 @@ async def compile_pdf(
 
     _assert_safe_latex(latex_source)
     _assert_no_empty_itemize(latex_source)
+    validate_latex_for_export(latex_source)
 
     generated_tex_path.write_text(latex_source, encoding="utf-8")
 
@@ -179,7 +202,7 @@ async def compile_pdf(
 
             shutil.copy2(generated_tex_path, tex_path)
 
-            logger.info(f"[{generation_id}] Using local pdflatex for compilation.")
+            logger.info("[%s] Using local pdflatex for compilation.", generation_id)
             for pass_num in range(2):
                 process = await asyncio.create_subprocess_exec(
                     "pdflatex",
@@ -193,13 +216,13 @@ async def compile_pdf(
                     stderr=asyncio.subprocess.PIPE,
                 )
                 try:
-                    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=45)
+                    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=60)
                 except asyncio.TimeoutError as exc:
                     process.kill()
                     await process.communicate()
                     raise PDFCompileError(
                         "pdflatex timed out",
-                        errors=["PDF compilation timed out after 45 seconds."],
+                        errors=["PDF compilation timed out after 60 seconds."],
                         generated_tex_path=_safe_tex_path(str(generated_tex_path)),
                     ) from exc
 
@@ -241,7 +264,7 @@ async def compile_pdf(
             warnings = _parse_latex_warnings(log_path) if log_path.exists() else []
             shutil.copy2(pdf_path, final_pdf_path)
 
-        logger.info(f"[{generation_id}] PDF compilation completed: {final_pdf_path}")
+        logger.info("[%s] PDF compilation completed: %s", generation_id, final_pdf_path)
         return str(final_pdf_path), warnings
 
     except PDFCompileError:
@@ -410,11 +433,11 @@ def cleanup_old_output_files(max_age_hours: int = 24, keep_current_generation_id
             try:
                 file_path.unlink()
                 deleted_count += 1
-                logger.info(f"Cleaned up old output file: {file_path.name}")
+                logger.info("Cleaned up old output file: %s", file_path.name)
             except OSError as e:
-                logger.warning(f"Failed to delete old output file {file_path.name}: {e}")
+                logger.warning("Failed to delete old output file %s: %s", file_path.name, e)
 
     except Exception as e:
-        logger.error(f"Error during output cleanup: {e}")
+        logger.error("Error during output cleanup: %s", e)
 
     return deleted_count

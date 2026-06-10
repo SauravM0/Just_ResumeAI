@@ -14,6 +14,8 @@ from app.domain.rules import ACTION_VERBS, MAX_BULLET_LENGTH, MIN_BULLET_LENGTH
 from app.schemas.ats_planner import ATSKeywordPlannerOutput
 from app.schemas.jd import ParsedJD
 from app.schemas.resume import BulletStatus, ResumeBullet, ResumeRecommendation, ResumeSkillGroup
+from app.services.jd_sanitization_service import sanitize_parsed_jd
+from app.services.skill_taxonomy_service import merge_typed_skill_groups
 
 
 _ACTION_VERBS = {verb.casefold() for verb in ACTION_VERBS}
@@ -49,6 +51,7 @@ def strengthen_resume_recommendation(
     target_pages: int = 1,
 ) -> ResumeRecommendation:
     """Return a cleaned and strengthened copy of a resume recommendation."""
+    parsed_jd = sanitize_parsed_jd(parsed_jd)
     strengthened = recommendation.model_copy(deep=True)
     strengthened.target_title = _clean_target_title(
         (ats_plan.target_resume_title if ats_plan and ats_plan.target_resume_title else None)
@@ -62,6 +65,7 @@ def strengthen_resume_recommendation(
     strengthened.skills = _strengthen_skill_groups(strengthened.skills, parsed_jd, ats_plan)
     strengthened.warnings = _dedupe([
         *strengthened.warnings,
+        *([] if not ats_plan else ats_plan.seniority_warnings),
         *_unsupported_certification_warnings(parsed_jd, strengthened),
     ])
 
@@ -94,7 +98,7 @@ def _strengthen_summary(
     if missing:
         # Use an honest targeting sentence: it adds exact ATS terms while avoiding
         # a false claim that unsupported platform tools were used professionally.
-        target_context = ", ".join(missing[:8])
+        target_context = _natural_join(missing[:3])
         existing = f"{existing.rstrip('.')}. Targeting {parsed_jd.company or 'the organization'} {parsed_jd.job_title} work involving {target_context}."
     return _trim_words(existing, 120)
 
@@ -115,24 +119,16 @@ def _strengthen_skill_groups(
     existing = {_skill_key(skill) for group in result for skill in group.skills}
 
     required_terms = _skill_terms_for_ats(parsed_jd, ats_plan)
-    direct_terms: list[str] = []
     learning_terms: list[str] = []
     for term in required_terms:
         key = _skill_key(term)
         if key in existing or not _skill_like(term):
             continue
         # Domain/company-specific tools go into Learning Focus — all others direct.
-        if term in parsed_jd.domain_platform_terms or term in parsed_jd.deployment_environment_terms:
-            learning_terms.append(term)
-        else:
-            direct_terms.append(term)
+        learning_terms.append(term)
         existing.add(key)
 
-    if direct_terms:
-        _append_skills(result, "ATS Required Skills", direct_terms)
-    if learning_terms:
-        _append_skills(result, "Learning Focus / JD Tools", learning_terms)
-    return result
+    return merge_typed_skill_groups(result, [], learning_focus_values=learning_terms)
 
 
 def _clean_target_title(title: str) -> str:
@@ -140,6 +136,17 @@ def _clean_target_title(title: str) -> str:
     cleaned = re.sub(r"^\s*(designation|job\s*title|title|role)\s*:\s*", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s*:+\s*$", "", cleaned)
     return cleaned.strip(" :-\t")
+
+
+def _natural_join(values: list[str]) -> str:
+    cleaned = [value for value in values if value]
+    if not cleaned:
+        return "role-relevant delivery"
+    if len(cleaned) == 1:
+        return cleaned[0]
+    if len(cleaned) == 2:
+        return f"{cleaned[0]} and {cleaned[1]}"
+    return f"{cleaned[0]}, {cleaned[1]}, and {cleaned[2]}"
 
 
 def _strengthen_entry_bullets(entry) -> bool:
@@ -240,17 +247,6 @@ def _skill_terms_for_ats(parsed_jd: ParsedJD, ats_plan: ATSKeywordPlannerOutput 
         values.extend(ats_plan.must_include_skills)
         values.extend(ats_plan.must_include_tools_platforms)
     return _dedupe(values)[:50]
-
-
-def _append_skills(groups: list[ResumeSkillGroup], category: str, skills: list[str]) -> None:
-    cleaned = _dedupe([skill for skill in skills if _skill_like(skill)])
-    if not cleaned:
-        return
-    for index, group in enumerate(groups):
-        if group.category.casefold() == category.casefold():
-            groups[index] = group.model_copy(update={"skills": _dedupe([*group.skills, *cleaned])})
-            return
-    groups.append(ResumeSkillGroup(category=category, skills=cleaned))
 
 
 def _unsupported_certification_warnings(parsed_jd: ParsedJD, recommendation: ResumeRecommendation) -> list[str]:

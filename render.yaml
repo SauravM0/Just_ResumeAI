@@ -13,7 +13,6 @@ services:
         value: "false"
       - key: PORT
         value: "8000"
-      # CORS — set to your frontend URL (e.g. https://your-app.vercel.app)
       - key: CORS_ORIGINS
         sync: false
       # Gemini AI
@@ -23,6 +22,14 @@ services:
         value: gemini-2.5-flash
       - key: GEMINI_REVIEW_MODEL
         value: gemini-2.5-pro
+      - key: GEMINI_TIMEOUT_SECONDS
+        value: "45.0"
+      - key: GEMINI_MAX_TOKENS
+        value: "8192"
+      - key: GEMINI_MAX_RETRIES
+        value: "3"
+      - key: GEMINI_TEMPERATURE
+        value: "0.3"
       # Supabase
       - key: SUPABASE_URL
         sync: false
@@ -32,11 +39,41 @@ services:
         sync: false
       - key: SUPABASE_STORAGE_BUCKET
         value: generated-resumes
+      # RAG / Embeddings
+      - key: ENABLE_RAG_EMBEDDINGS
+        value: "true"
+      - key: EMBEDDING_MODEL
+        value: text-embedding-004
+      - key: EMBEDDING_DIMS
+        value: "768"
+      - key: SIMILARITY_THRESHOLD
+        value: "0.55"
+      # Feature flags
+      - key: ENABLE_JD_CACHE
+        value: "true"
+      - key: ENABLE_RECRUITER_REVIEW
+        value: "true"
+      - key: JD_CACHE_TTL_HOURS
+        value: "24"
+      # Rate limiting
+      - key: MAX_GENERATION_REQUESTS_PER_HOUR
+        value: "5"
+      - key: MAX_JD_ANALYSIS_REQUESTS_PER_HOUR
+        value: "15"
+      - key: MAX_REQUEST_BODY_SIZE_KB
+        value: "512"
+      # SSE streaming
+      - key: SSE_KEEPALIVE_INTERVAL
+        value: "15"
       # Generated file config
       - key: FILE_EXPIRY_DAYS
         value: "7"
+      - key: LATEX_EXTRACTION_CALIBRATION
+        value: "4.0"
       # Storage paths
       - key: LATEX_OUTPUT_DIR
         value: /app/output
       - key: LATEX_TEMPLATE_DIR
         value: /app/templates/latex
+      - key: MAX_JD_TEXT_LENGTH
+        value: "15000"

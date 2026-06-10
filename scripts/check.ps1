@@ -47,11 +47,26 @@ pip install ruff -q 2>$null
 ruff check app/ tests/
 if ($LASTEXITCODE -eq 0) { Pass "ruff lint" } else { Fail "ruff lint" }
 
-python -m pytest tests/ -v --tb=short
+# pytest (skip tests that need real API keys)
+$env:SKIP_SECRETS=1
+python -m pytest tests/ -v --tb=short -k "not integration and not e2e"
 if ($LASTEXITCODE -eq 0) { Pass "pytest" } else { Fail "pytest" }
 
 python -c "from app.main import app; print('  imports OK')"
 if ($LASTEXITCODE -eq 0) { Pass "app imports" } else { Fail "app imports" }
+
+# test that the new fixtures can be imported
+python -c "
+from tests.conftest import (
+    messy_jd_text, messy_parsed_jd,
+    senior_jd, fresher_profile,
+    clean_profile, missing_skills_profile,
+    truncated_bullets_resume, recommendation,
+    clean_jd, mid_profile, kubernetes_claim_resume,
+)
+print('  All fixtures import OK')
+"
+if ($LASTEXITCODE -eq 0) { Pass "fixture imports" } else { Fail "fixture imports" }
 
 # ── Frontend ─────────────────────────────────────────────────
 Info "Frontend"

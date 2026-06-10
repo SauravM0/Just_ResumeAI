@@ -53,8 +53,16 @@ export interface JDAnalyzeRequest {
   raw_jd_text: string;
 }
 
+import type { ValidationStatus } from './resume';
+
 export interface JDAnalyzeResponse {
   generation_id: string;
+  parsed_jd: ParsedJD;
+  warnings: string[];
+  validation_status?: ValidationStatus;
+}
+
+export interface JDAnalysisPreview {
   parsed_jd: ParsedJD;
   warnings: string[];
 }

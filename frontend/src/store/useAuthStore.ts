@@ -17,6 +17,28 @@ interface AuthState {
 
 let authListenerStarted = false;
 let initializePromise: Promise<void> | null = null;
+const AUTH_BOOTSTRAP_TIMEOUT_MS = 8000;
+const POST_LOGIN_PATH_KEY = 'justresume_post_login_path';
+
+function safePostLoginPath(path: string | null): string {
+  if (!path || !path.startsWith('/') || path.startsWith('//')) {
+    return '/dashboard';
+  }
+  return path;
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timeoutId = window.setTimeout(() => {
+      reject(new Error(`${label} timed out. Please refresh or check your network connection.`));
+    }, timeoutMs);
+
+    promise
+      .then(resolve)
+      .catch(reject)
+      .finally(() => window.clearTimeout(timeoutId));
+  });
+}
 
 export const useAuthStore = create<AuthState>((set, get) => ({
   session: null,
@@ -36,12 +58,22 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         const params = new URLSearchParams(window.location.search);
         const code = params.get('code');
         if (code) {
-          const { error } = await supabase.auth.exchangeCodeForSession(code);
+          const { error } = await withTimeout(
+            supabase.auth.exchangeCodeForSession(code),
+            AUTH_BOOTSTRAP_TIMEOUT_MS,
+            'Supabase sign-in'
+          );
           if (error) throw error;
-          window.history.replaceState({}, document.title, `${window.location.pathname}${window.location.hash}`);
+          const postLoginPath = safePostLoginPath(window.sessionStorage.getItem(POST_LOGIN_PATH_KEY));
+          window.sessionStorage.removeItem(POST_LOGIN_PATH_KEY);
+          window.history.replaceState({}, document.title, postLoginPath);
         }
 
-        const { data, error } = await supabase.auth.getSession();
+        const { data, error } = await withTimeout(
+          supabase.auth.getSession(),
+          AUTH_BOOTSTRAP_TIMEOUT_MS,
+          'Supabase session check'
+        );
         if (error) throw error;
 
         set({
@@ -88,13 +120,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     try {
       const supabase = getSupabaseClient();
       const normalizedPath = redirectPath.startsWith('/') ? redirectPath : '/dashboard';
+      window.sessionStorage.setItem(POST_LOGIN_PATH_KEY, safePostLoginPath(normalizedPath));
       const { error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
         options: {
-          redirectTo: `${window.location.origin}${normalizedPath}`,
+          redirectTo: `${window.location.origin}/auth/callback`,
           queryParams: {
             access_type: 'offline',
-            prompt: 'consent',
+            prompt: 'select_account',
           },
         },
       });

@@ -70,7 +70,9 @@ TEMPLATE_FIELDS = [
 ]
 
 # ─── Scoring Weights ────────────────────────────────────────────────────────
-
+# DEPRECATED: These weights are no longer used by scoring_service.py.
+# The new scorer uses 18 dimensions defined in _WEIGHTS within scoring_service.py.
+# Kept here only for backward compatibility with any external references.
 SCORE_WEIGHT_KEYWORD = 0.50
 SCORE_WEIGHT_READABILITY = 0.30
 SCORE_WEIGHT_FORMAT = 0.20

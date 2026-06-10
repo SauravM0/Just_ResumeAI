@@ -81,6 +81,8 @@ class GeminiClient:
         self._timeout = settings.GEMINI_TIMEOUT_SECONDS
         self._retry_base_delay = settings.GEMINI_RETRY_BASE_DELAY_SECONDS
         self._retry_max_delay = settings.GEMINI_RETRY_MAX_DELAY_SECONDS
+        # Expose retry count for pipeline diagnostics
+        self.last_retry_count: int = 0
 
     async def generate_structured(
         self,
@@ -124,6 +126,7 @@ class GeminiClient:
 
         raw_text: str | None = None
         error_msg: str = ""
+        self.last_retry_count = 0
 
         total_attempts = 1 + self._max_retries
         for attempt in range(total_attempts):
@@ -153,6 +156,7 @@ class GeminiClient:
             except (json.JSONDecodeError, ValidationError) as e:
                 error_msg = str(e)
                 response_len = len(raw_text or "")
+                self.last_retry_count = attempt + 1
                 logger.warning(
                     "Gemini response validation failed model=%s attempt=%s/%s error=%s response_len=%s",
                     self._model,
@@ -170,6 +174,7 @@ class GeminiClient:
 
             except asyncio.TimeoutError:
                 error_msg = f"Gemini call timed out after {self._timeout} seconds"
+                self.last_retry_count = attempt + 1
                 logger.warning(
                     "Gemini timeout model=%s attempt=%s/%s timeout=%ss",
                     self._model,
@@ -189,6 +194,7 @@ class GeminiClient:
 
             except Exception as e:
                 if self._is_transient_error(e) and attempt < self._max_retries:
+                    self.last_retry_count = attempt + 1
                     is_quota = "429" in str(e).upper() or "RESOURCE_EXHAUSTED" in str(e).upper()
                     logger.warning(
                         "Transient Gemini API error attempt=%s/%s is_quota=%s",

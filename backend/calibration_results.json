@@ -1,0 +1,67 @@
+{
+  "calibration_date": null,
+  "score_tolerance_points": 8.0,
+  "baseline_latex_extraction_calibration": 4.0,
+  "results": [
+    {
+      "id": "fresher_backend",
+      "description": "Fresher CS student applying for Backend Engineer",
+      "profile_fixture": "fresher_profile",
+      "jd_fixture": "backend_jd",
+      "internal_score": null,
+      "expected_range": [75, 92],
+      "pdf_path": "",
+      "jobscan_score": null,
+      "delta": null,
+      "within_8_points": null
+    },
+    {
+      "id": "experienced_backend",
+      "description": "Experienced developer applying for Backend Engineer",
+      "profile_fixture": "experienced_profile",
+      "jd_fixture": "backend_jd",
+      "internal_score": null,
+      "expected_range": [82, 95],
+      "pdf_path": "",
+      "jobscan_score": null,
+      "delta": null,
+      "within_8_points": null
+    },
+    {
+      "id": "fresher_data_scientist",
+      "description": "Fresher CS student applying for Data Scientist",
+      "profile_fixture": "fresher_profile",
+      "jd_fixture": "ds_jd",
+      "internal_score": null,
+      "expected_range": [68, 88],
+      "pdf_path": "",
+      "jobscan_score": null,
+      "delta": null,
+      "within_8_points": null
+    },
+    {
+      "id": "experienced_data_scientist",
+      "description": "Experienced backend developer applying for Data Scientist",
+      "profile_fixture": "experienced_profile",
+      "jd_fixture": "ds_jd",
+      "internal_score": null,
+      "expected_range": [55, 78],
+      "pdf_path": "",
+      "jobscan_score": null,
+      "delta": null,
+      "within_8_points": null
+    },
+    {
+      "id": "experienced_backend_two_page",
+      "description": "Experienced developer applying for Backend Engineer with two-page target",
+      "profile_fixture": "experienced_profile",
+      "jd_fixture": "backend_jd",
+      "internal_score": null,
+      "expected_range": [82, 95],
+      "pdf_path": "",
+      "jobscan_score": null,
+      "delta": null,
+      "within_8_points": null
+    }
+  ]
+}

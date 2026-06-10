@@ -1,221 +1,218 @@
-import { lazy, Suspense, useEffect, useState } from 'react';
-import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import ProtectedRoute, { AuthLoadingScreen } from './components/ProtectedRoute';
-import UserMenu from './components/UserMenu';
-import MobileNav from './components/ui/MobileNav';
-import { useAppStore } from './store/useAppStore';
+import { useEffect } from 'react';
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { ErrorBoundary } from './components/ErrorBoundary';
+import Login from './pages/Login';
+import Dashboard from './pages/Dashboard';
+import MasterProfile from './pages/MasterProfile';
+import FastResumeBuilder from './pages/FastResumeBuilder';
+import ResumeCreationWizard from './pages/ResumeCreationWizard';
+import ResumeReview from './pages/ResumeReview';
+import History from './pages/History';
+import HistoryDetail from './pages/HistoryDetail';
+import CoverLetter from './pages/CoverLetter';
+import Settings from './pages/Settings';
+import AccessDenied from './pages/AccessDenied';
+import ProtectedRoute from './components/ProtectedRoute';
+import AppShell from './components/layout/AppShell';
 import { useAuthStore } from './store/useAuthStore';
-import './index.css';
 
-const Dashboard = lazy(() => import('./pages/Dashboard'));
-const MasterProfile = lazy(() => import('./pages/MasterProfile'));
-const JDInput = lazy(() => import('./pages/JDInput'));
-const ResumeReview = lazy(() => import('./pages/ResumeReview'));
-const CoverLetter = lazy(() => import('./pages/CoverLetter'));
-const History = lazy(() => import('./pages/History'));
-const HistoryDetail = lazy(() => import('./pages/HistoryDetail'));
-const Settings = lazy(() => import('./pages/Settings'));
-const Login = lazy(() => import('./pages/Login'));
-const AccessDenied = lazy(() => import('./pages/AccessDenied'));
-
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: { retry: 1, staleTime: 30_000 },
-    mutations: { retry: 0 },
-  },
-});
-
-const navItems = [
-  { path: '/dashboard', label: 'Dashboard', icon: '⌂' },
-  { path: '/profile', label: 'Master Profile', icon: '👤' },
-  { path: '/jd', label: 'New Resume', icon: '📄' },
-  { path: '/history', label: 'History', icon: '⏱' },
-  { path: '/settings', label: 'Settings', icon: '⚙' },
-];
-
-const pageTitles: Record<string, string> = {
-  '/dashboard': 'Dashboard',
-  '/profile': 'Master Profile',
-  '/jd': 'New Resume',
-  '/history': 'History',
-  '/settings': 'Settings',
-};
-
-function RootRedirect() {
-  const { session, loading, initialized } = useAuthStore();
-  if (loading || !initialized) {
-    return <AuthLoadingScreen />;
-  }
-  return <Navigate to={session ? '/dashboard' : '/login'} replace />;
-}
-
-function AppLayout() {
+function ProtectedLayout({ children, title }: { children: React.ReactNode; title?: string }) {
   const location = useLocation();
-  const { generationId } = useAppStore();
-  const [sidebarOpen, setSidebarOpen] = useState(false);
 
-  const currentTitle = generationId && location.pathname.startsWith('/review')
-    ? 'Resume Editor'
-    : generationId && location.pathname.startsWith('/cover-letter')
-    ? 'Cover Letter'
-    : generationId && location.pathname.startsWith('/history/')
-    ? 'Generation Detail'
-    : pageTitles[location.pathname] || 'JustResume AI';
-
-  const workflowItems = [
-    {
-      path: generationId ? `/review/${generationId}` : '#',
-      label: 'Resume Editor',
-      disabled: !generationId,
-    },
-    {
-      path: generationId ? `/cover-letter/${generationId}` : '#',
-      label: 'Cover Letter',
-      disabled: !generationId,
-    },
-  ];
+  // Update document title on mount/change
+  useEffect(() => {
+    const baseTitle = 'Just Resume';
+    document.title = title ? `${title} | ${baseTitle}` : baseTitle;
+  }, [title]);
 
   return (
-    <div className="app-layout">
-      <div
-        className={`sidebar-overlay ${sidebarOpen ? 'open' : ''}`}
-        onClick={() => setSidebarOpen(false)}
-        aria-hidden="true"
-      />
-
-      <aside className={`sidebar app-sidebar ${sidebarOpen ? 'sidebar-open' : ''}`}>
-        <div className="sidebar-logo">
-          <div className="logo-icon">JR</div>
-          <h1>JustResume AI</h1>
-        </div>
-
-        <nav className="sidebar-nav" aria-label="Primary navigation">
-          {navItems.map((item) => (
-            <NavLink
-              key={item.path}
-              to={item.path}
-              end={item.path === '/dashboard'}
-              className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
-              onClick={() => setSidebarOpen(false)}
-            >
-              <span className="nav-icon">{item.icon}</span>
-              <span>{item.label}</span>
-            </NavLink>
-          ))}
-        </nav>
-
-        <div className="workflow-nav">
-          <div className="section-label">Current run</div>
-          {workflowItems.map((item) => (
-            <NavLink
-              key={item.path}
-              to={item.path}
-              className={({ isActive }) =>
-                `nav-item nav-item-compact ${isActive ? 'active' : ''} ${item.disabled ? 'disabled' : ''}`
-              }
-              onClick={(event) => {
-                if (item.disabled) event.preventDefault();
-                else setSidebarOpen(false);
-              }}
-            >
-              <span>{item.label}</span>
-            </NavLink>
-          ))}
-        </div>
-
-        <div className="session-panel">
-          <div className="section-label">Generation</div>
-          {generationId ? (
-            <div className="session-pill session-pill-active">{generationId.slice(0, 8)}...</div>
-          ) : (
-            <div className="session-pill">No active generation</div>
-          )}
-        </div>
-      </aside>
-
-      <div className="app-main-frame">
-        <header className="app-header">
-          <div className="app-header-left">
-            <button
-              className="mobile-menu-btn"
-              onClick={() => setSidebarOpen(!sidebarOpen)}
-              aria-label="Toggle navigation menu"
-            >
-              {sidebarOpen ? '✕' : '☰'}
-            </button>
-            <div>
-              <p className="app-header-eyebrow">JustResume</p>
-              <h2>{currentTitle}</h2>
-            </div>
-          </div>
-          <UserMenu />
-        </header>
-
-        <main className="main-content app-main-content">
-          <div className="page-scroll">
-            <PageSuspense>
-              <Routes>
-                <Route path="/dashboard" element={<Dashboard />} />
-                <Route path="/profile" element={<MasterProfile />} />
-                <Route path="/jd" element={<JDInput />} />
-                <Route path="/review/:generationId" element={<ResumeReview />} />
-                <Route path="/review" element={<Navigate to={generationId ? `/review/${generationId}` : '/jd'} replace />} />
-                <Route path="/history" element={<History />} />
-                <Route path="/history/:generationId" element={<HistoryDetail />} />
-                <Route path="/cover-letter/:generationId" element={<CoverLetter />} />
-                <Route path="/cover-letter" element={<Navigate to={generationId ? `/cover-letter/${generationId}` : '/jd'} replace />} />
-                <Route path="/settings" element={<Settings />} />
-                <Route path="*" element={<Navigate to="/dashboard" replace />} />
-              </Routes>
-            </PageSuspense>
-          </div>
-        </main>
-
-        <MobileNav />
-      </div>
-    </div>
+    <AppShell title={title}>
+      <ErrorBoundary resetKey={location.pathname}>
+        {children}
+      </ErrorBoundary>
+    </AppShell>
   );
 }
 
-function PageSuspense({ children }: { children: React.ReactNode }) {
-  return (
-    <Suspense fallback={<div className="page-scroll" style={{ padding: 'var(--space-lg)' }}><div className="spinner spinner-lg" style={{ margin: '0 auto' }} /></div>}>
-      {children}
-    </Suspense>
-  );
+function LoginPage() {
+  useEffect(() => {
+    document.title = 'Sign In | Just Resume';
+  }, []);
+  return <Login />;
 }
 
-function AppRoutes() {
+function AuthCallbackPage() {
+  const { session, error } = useAuthStore();
+  const params = new URLSearchParams(window.location.search);
+  const callbackError = params.get('error_description') || params.get('error');
+
+  if (session) {
+    return <Navigate to="/dashboard" replace />;
+  }
+
   return (
-    <Routes>
-      <Route path="/" element={<RootRedirect />} />
-      <Route path="/login" element={<PageSuspense><Login /></PageSuspense>} />
-      <Route path="/access-denied" element={<PageSuspense><AccessDenied /></PageSuspense>} />
-      <Route
-        path="/*"
-        element={
-          <ProtectedRoute>
-            <AppLayout />
-          </ProtectedRoute>
-        }
-      />
-    </Routes>
+    <main className="login-page">
+      <section className="login-panel">
+        <div className="login-brand">
+          <div className="logo-icon login-logo">JR</div>
+          <div>
+            <h1>JustResume AI</h1>
+            <p>Create tailored ATS-friendly resumes from your master profile.</p>
+          </div>
+        </div>
+        <div className="login-card">
+          <div className="login-copy">
+            <span className="badge badge-danger">Authentication callback failed</span>
+            <h2>Google sign-in did not create a session</h2>
+            <p style={{ color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+              {callbackError || error || 'Supabase returned to the app without a valid login session.'}
+            </p>
+            <p style={{ color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+              Confirm <code>http://localhost:3099/auth/callback</code> is in Supabase redirect URLs.
+              If it is already there, re-save the Google provider Client ID and Client Secret in Supabase.
+            </p>
+          </div>
+          <a className="btn btn-primary btn-lg google-login-button" href="/login">
+            Back to sign in
+          </a>
+        </div>
+      </section>
+    </main>
   );
 }
 
 export default function App() {
-  const initialize = useAuthStore((state) => state.initialize);
+  const { session, initialized, initialize } = useAuthStore();
 
   useEffect(() => {
     void initialize();
   }, [initialize]);
 
+  if (!initialized) {
+    return (
+      <div className="auth-loading-screen">
+        <div className="auth-loading-card">
+          <div className="spinner spinner-lg" />
+          <div>
+            <h1>Just Resume</h1>
+            <p>Loading your workspace...</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <AppRoutes />
-      </BrowserRouter>
-    </QueryClientProvider>
+    <BrowserRouter>
+      <Routes>
+        {/* Public routes */}
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="/auth/callback" element={<AuthCallbackPage />} />
+        <Route path="/access-denied" element={<AccessDenied />} />
+
+        {/* Root redirect */}
+        <Route
+          path="/"
+          element={
+            session ? <Navigate to="/dashboard" replace /> : <Navigate to="/login" replace />
+          }
+        />
+
+        {/* Protected routes with AppShell */}
+        <Route
+          path="/dashboard"
+          element={
+            <ProtectedRoute>
+              <ProtectedLayout title="Dashboard">
+                <Dashboard />
+              </ProtectedLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/profile"
+          element={
+            <ProtectedRoute>
+              <ProtectedLayout title="Profile">
+                <MasterProfile />
+              </ProtectedLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/create-resume/advanced"
+          element={
+            <ProtectedRoute>
+              <ProtectedLayout title="Advanced Resume Builder">
+                <ResumeCreationWizard />
+              </ProtectedLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/create-resume"
+          element={
+            <ProtectedRoute>
+              <ProtectedLayout title="Fast Resume Builder">
+                <FastResumeBuilder />
+              </ProtectedLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/review/:generationId"
+          element={
+            <ProtectedRoute>
+              <ProtectedLayout title="Resume Review">
+                <ResumeReview />
+              </ProtectedLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/history"
+          element={
+            <ProtectedRoute>
+              <ProtectedLayout title="History">
+                <History />
+              </ProtectedLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/history/:id"
+          element={
+            <ProtectedRoute>
+              <ProtectedLayout title="History Detail">
+                <HistoryDetail />
+              </ProtectedLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/cover-letter/:generationId"
+          element={
+            <ProtectedRoute>
+              <ProtectedLayout title="Cover Letter">
+                <CoverLetter />
+              </ProtectedLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/settings"
+          element={
+            <ProtectedRoute>
+              <ProtectedLayout title="Settings">
+                <Settings />
+              </ProtectedLayout>
+            </ProtectedRoute>
+          }
+        />
+
+        {/* Catch-all */}
+        <Route path="*" element={<Navigate to="/dashboard" replace />} />
+      </Routes>
+    </BrowserRouter>
   );
 }

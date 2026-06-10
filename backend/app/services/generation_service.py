@@ -41,6 +41,7 @@ def create_generation(
     raw_jd_text: str,
     profile_id: UUID | str | None = None,
     initial_data: JsonObject | None = None,
+    target_pages: int = 1,
 ) -> ResumeGenerationRecord:
     """
     Create a new resume generation record in Supabase.
@@ -53,6 +54,7 @@ def create_generation(
         company=initial_data.get("company") if initial_data else None,
         parsed_jd_json=initial_data.get("parsed_jd_json") if initial_data else None,
         status="draft",
+        target_pages=target_pages,
     )
     try:
         return svc.create_generation(_uuid_str(user_id), payload)

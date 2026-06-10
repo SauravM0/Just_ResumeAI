@@ -1,33 +1,141 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "5m"
+    max-file: "2"
+
 services:
   backend:
+    image: justresume-backend-local
     build:
       context: ./backend
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.local
     ports:
       - "8000:8000"
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir /app/app
     volumes:
-      - ./backend/output:/app/output
-      - ./backend/app:/app/app
-      - ./backend/templates:/app/templates
+      - ./backend:/app
+      - backend_output:/app/output
+      - backend_tmp:/app/tmp
     env_file:
-      - path: ./backend/.env
-        required: false
+      - .env
     environment:
       - APP_ENV=development
-      - DEBUG=true
+      - DEBUG=false
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - CORS_ORIGINS=["http://localhost:3099","http://127.0.0.1:3099","http://localhost:3000","http://127.0.0.1:3000","http://localhost:5173","http://127.0.0.1:5173"]
       - LATEX_OUTPUT_DIR=/app/output
+      - TMPDIR=/app/tmp
+      - MAX_GENERATION_REQUESTS_PER_HOUR=5
+      - HOURLY_GENERATION_LIMIT_PER_USER=50
+      - DAILY_GENERATION_LIMIT_PER_USER=200
+      - MAX_JD_ANALYSIS_REQUESTS_PER_HOUR=15
+      - MAX_REQUEST_BODY_SIZE_KB=512
+      - ENABLE_JD_CACHE=true
+      - ENABLE_RAG_EMBEDDINGS=true
+      - ENABLE_RECRUITER_REVIEW=true
+      - JD_CACHE_TTL_HOURS=24
+      - SSE_KEEPALIVE_INTERVAL=15
+      - GEMINI_TIMEOUT_SECONDS=45.0
+      - GEMINI_MAX_TOKENS=8192
+      - GEMINI_MAX_RETRIES=3
+      - GEMINI_TEMPERATURE=0.3
+      - EMBEDDING_MODEL=text-embedding-004
+      - EMBEDDING_DIMS=768
+      - SIMILARITY_THRESHOLD=0.55
+      - LATEX_EXTRACTION_CALIBRATION=4.0
+    logging: *default-logging
+    restart: unless-stopped
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
-      - "5173:5173"
-    env_file:
-      - path: ./frontend/.env
-        required: false
+      - "${FRONTEND_PORT:-3099}:80"
     environment:
       - VITE_API_BASE=http://localhost:8000/api/v1
+      - VITE_SUPABASE_URL=${VITE_SUPABASE_URL}
+      - VITE_SUPABASE_ANON_KEY=${VITE_SUPABASE_ANON_KEY}
+      - VITE_APP_ENV=production
     depends_on:
       backend:
         condition: service_healthy
+    logging: *default-logging
+    restart: unless-stopped
+
+  worker:
+    image: justresume-backend-local
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.local
+    command: python -m app.worker
+    volumes:
+      - ./backend:/app
+      - backend_output:/app/output
+      - backend_tmp:/app/tmp
+    env_file:
+      - .env
+    environment:
+      - APP_ENV=production
+      - DEBUG=false
+      - LOG_LEVEL=WARNING
+      - LATEX_OUTPUT_DIR=/app/output
+      - TMPDIR=/app/tmp
+      - GENERATION_EXECUTOR=worker
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+    depends_on:
+      redis:
+        condition: service_healthy
+    logging: *default-logging
+    restart: unless-stopped
+    profiles:
+      - worker
+
+  sweeper:
+    image: justresume-backend-local
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.local
+    command: python -m app.sweeper --loop
+    volumes:
+      - backend_tmp:/app/tmp
+    env_file:
+      - .env
+    environment:
+      - APP_ENV=production
+      - DEBUG=false
+      - LOG_LEVEL=WARNING
+      - TMPDIR=/app/tmp
+      - GENERATION_EXECUTOR=worker
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - GENERATION_STALE_SWEEPER_ENABLED=true
+    depends_on:
+      redis:
+        condition: service_healthy
+    logging: *default-logging
+    restart: unless-stopped
+    profiles:
+      - sweeper
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    logging: *default-logging
+    profiles:
+      - worker
+      - sweeper
+
+volumes:
+  backend_output:
+  backend_tmp:
+  redis_data:

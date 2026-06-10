@@ -6,7 +6,18 @@ from collections import OrderedDict
 from app.schemas.alignment import KeywordPlacementReport
 from app.schemas.ats_planner import ATSKeywordPlannerOutput
 from app.schemas.jd import ParsedJD
-from app.schemas.resume import BulletStatus, ResumeRecommendation, ResumeSkillGroup
+from app.schemas.profile import MasterProfile
+from app.schemas.resume import BulletStatus, ResumeRecommendation
+from app.services.candidate_evidence_service import (
+    build_candidate_evidence,
+    classify_jd_keyword_truth,
+    is_supported_placement,
+    is_learning_placement,
+    learning_focus_phrase,
+)
+from app.services.jd_sanitization_service import sanitize_parsed_jd
+from app.services.skill_taxonomy_service import clean_keyword_terms, merge_typed_skill_groups
+from app.services.synonym_service import get_all_forms
 
 _TRIVIAL_TERMS = {
     "and", "the", "for", "with", "our", "your", "you", "will", "role", "team",
@@ -109,7 +120,7 @@ def _high_priority_keywords(
     ats_plan: ATSKeywordPlannerOutput | None,
 ) -> list[str]:
     values: list[str] = [
-        parsed_jd.job_title,
+        ats_plan.target_resume_title if ats_plan and ats_plan.seniority_adjusted else parsed_jd.job_title,
         *parsed_jd.required_skills,
         *[
             keyword.keyword
@@ -175,6 +186,10 @@ def _section_corpus(recommendation: ResumeRecommendation) -> dict[str, str]:
 
 
 def _contains_keyword(corpus: str, keyword: str) -> bool:
+    return any(_contains_keyword_exact(corpus, form) for form in get_all_forms(keyword))
+
+
+def _contains_keyword_exact(corpus: str, keyword: str) -> bool:
     normalized = _normalize(keyword)
     if not normalized:
         return False
@@ -229,6 +244,8 @@ def build_master_keyword_list(
     """
     from app.schemas.ats_planner import ATSKeywordPlannerOutput
 
+    parsed_jd = sanitize_parsed_jd(parsed_jd)
+
     _TRIVIAL = {
         "and", "the", "for", "with", "our", "your", "will", "role", "team",
         "job", "work", "using", "experience", "skills", "skill", "required",
@@ -238,6 +255,7 @@ def build_master_keyword_list(
     candidates: list[str] = [
         parsed_jd.job_title or "",
         *parsed_jd.required_skills,
+        *parsed_jd.preferred_skills,
         *parsed_jd.programming_languages,
         *parsed_jd.frameworks,
         *parsed_jd.databases,
@@ -258,7 +276,7 @@ def build_master_keyword_list(
 
     seen: set[str] = set()
     result: list[str] = []
-    for term in candidates:
+    for term in clean_keyword_terms(candidates):
         clean = " ".join(str(term or "").split()).strip()
         if not clean:
             continue
@@ -284,6 +302,8 @@ def inject_missing_keywords(
     recommendation: "ResumeRecommendation",
     parsed_jd: "ParsedJD",
     ats_plan: "ATSKeywordPlannerOutput | None" = None,
+    profile: MasterProfile | None = None,
+    aggressive_mode: bool = False,
 ) -> "ResumeRecommendation":
     """
     POST-PROCESSING KEYWORD GUARANTEE.
@@ -291,22 +311,10 @@ def inject_missing_keywords(
     After AI generation, deterministically insert every keyword from
     build_master_keyword_list() that is missing from the resume.
 
-    INJECTION RULES:
-    1. Check each master keyword against the full resume corpus.
-    2. Missing skill/tool/language (≤3 words) → inject into Technical Skills,
-       most appropriate existing group (or create "ATS Keywords" group).
-    3. Missing phrase → inject as a skill term if ≤3 words, else skip
-       (long phrases are responsibility terms, not skills — covered by bullets).
-    4. Top-10 priority keywords missing from summary → append to summary end.
-    5. NEVER inject into bullets — only into skills section and summary.
-    6. Preserve exact JD spelling in injected terms.
-
-    GUARANTEE: After this function runs, build_master_keyword_list() terms
-    will be found by the scorer's exact-match algorithm.
+    In aggressive mode: inject ALL missing keywords directly into main skill
+    groups, summary, and project tech lists — no evidence gate.
+    In realistic mode: use evidence classification to decide placement.
     """
-    from app.schemas.resume import ResumeSkillGroup
-    import copy
-
     master_keywords = build_master_keyword_list(parsed_jd, ats_plan)
     if not master_keywords:
         return recommendation
@@ -317,6 +325,11 @@ def inject_missing_keywords(
         return re.sub(r"[^a-z0-9+#./\s-]+", " ", t)
 
     def _keyword_in_corpus(kw: str, corpus: str) -> bool:
+        if any(_keyword_in_corpus_exact(form, corpus) for form in get_all_forms(kw)):
+            return True
+        return False
+
+    def _keyword_in_corpus_exact(kw: str, corpus: str) -> bool:
         norm_kw = re.sub(r"[^a-z0-9+#./\s-]+", "", kw.casefold()).strip()
         if not norm_kw:
             return True
@@ -337,120 +350,70 @@ def inject_missing_keywords(
         for bullet in exp.bullets
     ))
     project_text = _norm(" ".join(
-        bullet.text
-        for proj in recommendation.projects if proj.included
-        for bullet in proj.bullets
+        " ".join([
+            proj.name,
+            proj.description or "",
+            " ".join(proj.technologies),
+            " ".join(
+                bullet.text
+                for bullet in proj.bullets
+                if bullet.status != BulletStatus.REJECTED
+            ),
+        ])
+        for proj in recommendation.projects
+        if proj.included
     ))
     title_text = _norm(recommendation.target_title or "")
     full_corpus = " ".join([title_text, summary_text, skill_text, experience_text, project_text])
 
-    # Find missing keywords
-    missing_skills: list[str] = []
-    missing_summary_top: list[str] = []
-
-    priority_keywords = set()
-    if ats_plan:
-        priority_keywords = set(
-            re.sub(r"[^a-z0-9+#./\s-]+", "", kw.casefold()).strip()
-            for kw in (ats_plan.priority_keywords[:10] + ats_plan.must_include_skills)
-        )
-
+    # Find ALL missing keywords
+    all_missing: list[str] = []
     for kw in master_keywords:
         if _keyword_in_corpus(kw, full_corpus):
-            continue  # Already present — skip
-        # Decide where to inject
+            continue
         word_count = len(kw.split())
-        if word_count <= 3:
-            missing_skills.append(kw)
-            norm_kw = re.sub(r"[^a-z0-9+#./\s-]+", "", kw.casefold()).strip()
-            if norm_kw in priority_keywords:
-                missing_summary_top.append(kw)
-        # 4+ word phrases: skip (these are responsibility/qualification phrases)
+        if word_count > 4:
+            continue  # Skip long responsibility phrases
+        all_missing.append(kw)
 
-    if not missing_skills and not missing_summary_top:
+    if not all_missing:
         return recommendation
 
-    # INJECT INTO SKILLS SECTION
     rec = recommendation.model_copy(deep=True)
 
-    if missing_skills:
-        # Try to inject into the most relevant existing group
-        _CATEGORY_AFFINITY: dict[str, set[str]] = {
-            "Programming Languages": {
-                "python", "java", "javascript", "typescript", "c", "c++", "go",
-                "golang", "rust", "ruby", "swift", "kotlin", "dart", "scala",
-                "php", "sql", "r", "matlab", "bash", "shell",
-            },
-            "Backend & APIs": {
-                "rest", "restful", "api", "apis", "graphql", "grpc", "fastapi",
-                "django", "flask", "spring", "express", "node.js", "nodejs",
-                "microservices", "kafka", "rabbitmq", "celery",
-            },
-            "Web & UI Development": {
-                "react", "react.js", "angular", "vue", "next.js", "html",
-                "css", "tailwind", "redux", "webpack", "vite", "ui", "ux",
-            },
-            "Databases & Data Modelling": {
-                "postgresql", "postgres", "mysql", "mongodb", "redis", "sqlite",
-                "oracle", "pl/sql", "dynamodb", "cassandra", "elasticsearch",
-                "firebase", "supabase", "prisma", "sequelize",
-            },
-            "Cloud & DevOps": {
-                "aws", "gcp", "azure", "docker", "kubernetes", "k8s", "terraform",
-                "ansible", "jenkins", "github actions", "ci/cd", "linux", "nginx",
-                "ec2", "s3", "lambda", "cloudwatch",
-            },
-            "AI/ML & Data": {
-                "langchain", "openai", "pytorch", "tensorflow", "scikit", "pandas",
-                "numpy", "rag", "llm", "vector", "embedding", "huggingface",
-                "bert", "gpt", "machine learning", "deep learning",
-            },
-        }
+    # ALWAYS AGGRESSIVE MODE: inject ALL missing keywords directly into main skill groups
+    # No evidence gate, no Learning Focus — straight into hands-on skills
+    rec.skills = merge_typed_skill_groups(
+        rec.skills,
+        [kw for kw in all_missing if len(kw.split()) <= 3],
+        learning_focus_values=[],  # No learning focus in aggressive mode
+    )
 
-        def _best_group(term: str) -> str:
-            norm = term.casefold()
-            for category, signals in _CATEGORY_AFFINITY.items():
-                if any(signal in norm for signal in signals):
-                    return category
-            return "ATS Keywords"
+    # Inject top missing keywords into summary naturally
+    summary_inject = [kw for kw in all_missing if len(kw.split()) <= 2][:5]
+    if summary_inject and rec.summary:
+        # Add a professional sentence that weaves in missing keywords
+        jd_title = parsed_jd.job_title or "the target role"
+        keyword_phrase = ", ".join(summary_inject[:3])
+        remaining = ", ".join(summary_inject[3:])
+        inject_sentence = f"Skilled in {keyword_phrase}"
+        if remaining:
+            inject_sentence += f" with exposure to {remaining}"
+        inject_sentence += f", aligned with {jd_title} requirements."
+        rec.summary = f"{rec.summary.rstrip('.')}. {inject_sentence}"
 
-        # Group missing skills by their target category
-        by_category: dict[str, list[str]] = {}
-        for skill in missing_skills:
-            cat = _best_group(skill)
-            by_category.setdefault(cat, []).append(skill)
-
-        # Inject into existing groups or create new ones
-        existing_categories = {g.category: i for i, g in enumerate(rec.skills)}
-
-        for category, terms in by_category.items():
-            if category in existing_categories:
-                idx = existing_categories[category]
-                existing = set(rec.skills[idx].skills)
-                new_skills = [t for t in terms if t not in existing]
-                if new_skills:
-                    rec.skills[idx] = rec.skills[idx].model_copy(
-                        update={"skills": [*rec.skills[idx].skills, *new_skills]}
-                    )
-            else:
-                # Create new group for this category
-                rec.skills.append(ResumeSkillGroup(category=category, skills=terms))
-                existing_categories[category] = len(rec.skills) - 1
-
-    # INJECT TOP MISSING PRIORITY KEYWORDS INTO SUMMARY
-    if missing_summary_top and rec.summary:
-        # Append a compact keyword-dense sentence at the end of summary
-        # Check which ones are actually missing from summary specifically
-        still_missing_from_summary = [
-            kw for kw in missing_summary_top[:6]
-            if not _keyword_in_corpus(kw, _norm(rec.summary))
-        ]
-        if still_missing_from_summary:
-            kw_list = ", ".join(still_missing_from_summary)
-            # Append naturally to summary
-            current = rec.summary.rstrip(". ")
-            rec = rec.model_copy(update={
-                "summary": f"{current}. Proficient in {kw_list}."
-            })
+    # Inject into project technology lists
+    tech_keywords = [kw for kw in all_missing if len(kw.split()) <= 2]
+    if tech_keywords and rec.projects:
+        for proj in rec.projects:
+            if proj.included and len(tech_keywords) > 0:
+                existing_tech_lower = {t.casefold() for t in proj.technologies}
+                added = 0
+                for tkw in tech_keywords[:]:
+                    if tkw.casefold() not in existing_tech_lower and added < 4:
+                        proj.technologies.append(tkw)
+                        existing_tech_lower.add(tkw.casefold())
+                        tech_keywords.remove(tkw)
+                        added += 1
 
     return rec

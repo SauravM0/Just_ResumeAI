@@ -1,9 +1,11 @@
 import { createClient } from '@supabase/supabase-js';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { getRuntimeConfig } from './env';
 
 export function requireSupabaseConfig(): { supabaseUrl: string; supabaseAnonKey: string } {
-  const supabaseUrl = import.meta.env.VITE_SUPABASE_URL?.trim();
-  const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY?.trim();
+  const runtime = getRuntimeConfig();
+  const supabaseUrl = runtime.VITE_SUPABASE_URL?.trim() || import.meta.env.VITE_SUPABASE_URL?.trim();
+  const supabaseAnonKey = runtime.VITE_SUPABASE_ANON_KEY?.trim() || import.meta.env.VITE_SUPABASE_ANON_KEY?.trim();
 
   if (!supabaseUrl || !supabaseAnonKey) {
     throw new Error('VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY are required.');
@@ -21,7 +23,8 @@ export function getSupabaseClient(): SupabaseClient {
       auth: {
         persistSession: true,
         autoRefreshToken: true,
-        detectSessionInUrl: true,
+        detectSessionInUrl: false,
+        flowType: 'pkce',
       },
     });
   }

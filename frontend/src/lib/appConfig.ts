@@ -1,4 +1,4 @@
-import { getApiBase } from './env';
+import { getApiBase, getRuntimeConfig } from './env';
 
 const APP_VERSION = import.meta.env.VITE_APP_VERSION || '0.1.0';
 const APP_ENV = import.meta.env.VITE_APP_ENV || import.meta.env.MODE || 'development';
@@ -23,19 +23,24 @@ let cachedConfig: AppConfig | null = null;
 export function getAppConfig(): AppConfig {
   if (cachedConfig) return cachedConfig;
 
+  const runtime = getRuntimeConfig();
   const apiBase = getApiBase();
-  const isProduction = APP_ENV === 'production' || import.meta.env.PROD;
+  const appEnv = runtime.VITE_APP_ENV || APP_ENV;
+  const isProduction = appEnv === 'production' || import.meta.env.PROD;
 
   cachedConfig = {
     appName: APP_NAME,
-    appVersion: APP_VERSION,
-    appEnv: APP_ENV,
+    appVersion: runtime.VITE_APP_VERSION || APP_VERSION,
+    appEnv,
     buildTime: BUILD_TIME,
     commitSha: COMMIT_SHA,
     apiBase,
     isDevelopment: !isProduction,
     isProduction,
-    supabaseConfigured: Boolean(import.meta.env.VITE_SUPABASE_URL && import.meta.env.VITE_SUPABASE_ANON_KEY),
+    supabaseConfigured: Boolean(
+      (runtime.VITE_SUPABASE_URL || import.meta.env.VITE_SUPABASE_URL) &&
+      (runtime.VITE_SUPABASE_ANON_KEY || import.meta.env.VITE_SUPABASE_ANON_KEY)
+    ),
   };
 
   return cachedConfig;
@@ -46,5 +51,4 @@ export function formatEnvironmentLabel(): string {
   const env = config.appEnv === 'production' ? 'Production' : config.appEnv === 'staging' ? 'Staging' : 'Development';
   return `${config.appName} v${config.appVersion} — ${env}`;
 }
-
 

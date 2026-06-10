@@ -10,12 +10,13 @@ import json
 import logging
 from typing import Any
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 import httpx
 
 from app.config import get_settings
 from app.services.supabase_service import SupabaseDatabaseError, SupabaseServiceConfigError, get_supabase_service
+from app.utils.observability import set_request_user
 
 logger = logging.getLogger(__name__)
 
@@ -147,7 +148,13 @@ def _verify_token_with_supabase_auth(token: str, fallback_claims: dict[str, Any]
     if not isinstance(expires_at, int):
         expires_at = int(datetime.now(tz=timezone.utc).timestamp())
 
-    claims = {**fallback_claims, "sub": user_id, "email": email}
+    claims = {
+        **fallback_claims,
+        "sub": user_id,
+        "email": email,
+        "app_metadata": user.get("app_metadata"),
+        "user_metadata": user.get("user_metadata"),
+    }
     return CurrentUser(
         user_id=user_id,
         email=email,
@@ -236,6 +243,7 @@ def _base64url_decode(value: str) -> bytes:
 
 
 def get_current_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> CurrentUser:
     if credentials is None or credentials.scheme.lower() != "bearer" or not credentials.credentials:
@@ -263,6 +271,7 @@ def get_current_user(
         )
 
     _require_allowed_user(current_user)
+    set_request_user(request, current_user.user_id)
     return current_user
 
 
@@ -273,9 +282,45 @@ def get_current_user_id(current_user: CurrentUser = Depends(get_current_user)) -
 def _require_allowed_user(current_user: CurrentUser) -> None:
     if not current_user.email:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Authenticated email is required")
+
+    settings = get_settings()
+
+    if settings.AUTH_ACCESS_MODE == "google":
+        if not _is_google_auth_user(current_user.claims):
+            logger.info(
+                "Rejected authenticated user without Google auth provider: %s",
+                current_user.email,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Google sign-in is required",
+            )
+        logger.info("auth.google.accepted user_id=%s email=%s", current_user.user_id, current_user.email)
+        return
+
+    if settings.ALLOW_ALL_AUTHENTICATED_USERS:
+        if settings.APP_ENV.lower() in {"prod", "production"}:
+            logger.error("ALLOW_ALL_AUTHENTICATED_USERS is enabled in production")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Access control is not configured",
+            )
+        logger.warning(
+            "ALLOW_ALL_AUTHENTICATED_USERS enabled; bypassing allowed_users check for %s",
+            current_user.email,
+        )
+        return
+
     try:
         if not get_supabase_service().is_allowed_user(current_user.email):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access is not allowlisted")
+            logger.info(
+                "Rejected authenticated user not present in allowed_users: %s",
+                current_user.email,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied",
+            )
     except HTTPException:
         raise
     except SupabaseServiceConfigError as exc:
@@ -285,8 +330,21 @@ def _require_allowed_user(current_user: CurrentUser) -> None:
             detail="Access control is not configured",
         ) from exc
     except SupabaseDatabaseError as exc:
-        logger.exception("Failed to verify allowlist")
+        logger.exception("Failed to verify/add user to allowlist")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Access control is unavailable",
         ) from exc
+
+
+def _is_google_auth_user(claims: dict[str, Any]) -> bool:
+    app_metadata = claims.get("app_metadata")
+    if not isinstance(app_metadata, dict):
+        return False
+
+    provider = app_metadata.get("provider")
+    if provider == "google":
+        return True
+
+    providers = app_metadata.get("providers")
+    return isinstance(providers, list) and "google" in providers

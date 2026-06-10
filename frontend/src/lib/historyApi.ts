@@ -45,8 +45,11 @@ export interface HistoryDetail {
   ats_score_json: any;
   alignment_report_json: any;
   ats_pre_check_json: any;
+  recruiter_review_json: any;
   cover_letter_text: string | null;
   latex_source: string | null;
+  docx_fallback_path: string | null;
+  pdf_compile_error: string | null;
   status: string;
   created_at: string | null;
   updated_at: string | null;
@@ -55,8 +58,8 @@ export interface HistoryDetail {
   file_expiry_info: FileExpiryInfo;
 }
 
-export async function getHistory(limit: number = 50): Promise<HistoryItem[]> {
-  return request(`/history?limit=${limit}`);
+export async function getHistory(limit: number = 50, offset: number = 0): Promise<HistoryItem[]> {
+  return request(`/history?limit=${limit}&offset=${offset}`);
 }
 
 export async function getHistoryDetail(generationId: string): Promise<HistoryDetail> {

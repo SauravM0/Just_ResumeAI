@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from app.schemas.jd import ParsedJD, SeniorityLevel
 from app.schemas.profile import MasterProfile
+from app.services.candidate_timeline_service import CandidateSeniority, assess_candidate_timeline, is_fresher_or_student
 
 
 class ResumeRoleClassification(str, Enum):
@@ -22,29 +23,31 @@ class ResumeStrategy(BaseModel):
     section_order: list[str] = Field(default_factory=list)
     preserve_sections: list[str] = Field(default_factory=list)
     trim_first: list[str] = Field(default_factory=list)
+    is_fresher_or_student: bool = False
 
 
 FRESHER_INTERN_SECTION_ORDER = [
-    "Contact",
-    "Target Title",
-    "Professional Summary",
-    "Education",
-    "Technical Skills",
-    "Projects",
-    "Experience",
-    "Achievements",
-    "Certifications",
+    "contact",
+    "target_title",
+    "summary",
+    "education",
+    "experience",
+    "projects",
+    "achievements",
+    "certifications",
+    "skills",
 ]
 
 EXPERIENCED_SECTION_ORDER = [
-    "Contact",
-    "Target Title",
-    "Professional Summary",
-    "Technical Skills",
-    "Professional Experience",
-    "Projects",
-    "Education",
-    "Certifications",
+    "contact",
+    "target_title",
+    "summary",
+    "experience",
+    "projects",
+    "education",
+    "achievements",
+    "certifications",
+    "skills",
 ]
 
 _FRESHER_SIGNALS = (
@@ -77,9 +80,37 @@ def build_resume_strategy(parsed_jd: ParsedJD, profile: MasterProfile | None = N
     classification = classify_resume_role(parsed_jd, profile)
     is_fresher = classification == ResumeRoleClassification.FRESHER_INTERN
 
+    # Determine dynamic section order
+    text = _jd_text(parsed_jd)
+    technical_focus = len(parsed_jd.programming_languages) + len(parsed_jd.frameworks) >= 5
+    
+    if is_fresher:
+        base_order = [
+            "contact", "target_title", "summary", "education"
+        ]
+        if technical_focus:
+            # For technical freshers, show what they can build and what they know first
+            base_order += ["skills", "projects", "experience"]
+        else:
+            base_order += ["experience", "projects", "skills"]
+        base_order += ["achievements", "certifications"]
+    else:
+        base_order = ["contact", "target_title", "summary"]
+        if technical_focus:
+            base_order += ["skills", "experience", "projects"]
+        else:
+            base_order += ["experience", "projects", "skills"]
+        base_order += ["education", "achievements", "certifications"]
+
+    # Determine frank fresher/student status from timeline evidence
+    timeline_fresher = False
+    if profile:
+        timeline = assess_candidate_timeline(profile)
+        timeline_fresher = is_fresher_or_student(timeline)
+
     return ResumeStrategy(
         classification=classification,
-        section_order=FRESHER_INTERN_SECTION_ORDER if is_fresher else EXPERIENCED_SECTION_ORDER,
+        section_order=base_order,
         preserve_sections=[
             "education",
             "projects",
@@ -96,11 +127,20 @@ def build_resume_strategy(parsed_jd: ParsedJD, profile: MasterProfile | None = N
             "generic phrases",
             "lower-value bullets",
         ],
+        is_fresher_or_student=timeline_fresher,
     )
 
 
 def classify_resume_role(parsed_jd: ParsedJD, profile: MasterProfile | None = None) -> ResumeRoleClassification:
     text = _jd_text(parsed_jd)
+
+    # Timeline-based classification takes priority — a student/fresher cannot
+    # be classified as SENIOR or EXPERIENCED even if the JD sounds senior.
+    if profile:
+        timeline = assess_candidate_timeline(profile)
+        if is_fresher_or_student(timeline):
+            return ResumeRoleClassification.FRESHER_INTERN
+
     if parsed_jd.seniority == SeniorityLevel.INTERN or any(signal in text for signal in _FRESHER_SIGNALS):
         return ResumeRoleClassification.FRESHER_INTERN
 
@@ -114,7 +154,11 @@ def classify_resume_role(parsed_jd: ParsedJD, profile: MasterProfile | None = No
     if domain_hits >= 2:
         return ResumeRoleClassification.DOMAIN_SPECIALIST
 
-    if profile and _estimated_experience_count(profile) <= 1 and profile.projects and profile.education:
+    if profile and assess_candidate_timeline(profile).candidate_seniority in {
+        CandidateSeniority.FRESHER,
+        CandidateSeniority.INTERN,
+        CandidateSeniority.ENTRY_LEVEL,
+    } and profile.projects and profile.education:
         return ResumeRoleClassification.ENTRY_LEVEL
 
     return ResumeRoleClassification.EXPERIENCED

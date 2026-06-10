@@ -56,3 +56,73 @@
 [[service.variables]]
   key = "LATEX_TEMPLATE_DIR"
   value = "/app/templates/latex"
+
+# ── New config vars ───────────────────────────────────────────────────
+
+[[service.variables]]
+  key = "ENABLE_JD_CACHE"
+  value = "true"
+
+[[service.variables]]
+  key = "ENABLE_RAG_EMBEDDINGS"
+  value = "true"
+
+[[service.variables]]
+  key = "ENABLE_RECRUITER_REVIEW"
+  value = "true"
+
+[[service.variables]]
+  key = "JD_CACHE_TTL_HOURS"
+  value = "24"
+
+[[service.variables]]
+  key = "MAX_GENERATION_REQUESTS_PER_HOUR"
+  value = "5"
+
+[[service.variables]]
+  key = "MAX_JD_ANALYSIS_REQUESTS_PER_HOUR"
+  value = "15"
+
+[[service.variables]]
+  key = "MAX_REQUEST_BODY_SIZE_KB"
+  value = "512"
+
+[[service.variables]]
+  key = "SSE_KEEPALIVE_INTERVAL"
+  value = "15"
+
+[[service.variables]]
+  key = "GEMINI_TIMEOUT_SECONDS"
+  value = "45.0"
+
+[[service.variables]]
+  key = "GEMINI_MAX_TOKENS"
+  value = "8192"
+
+[[service.variables]]
+  key = "GEMINI_MAX_RETRIES"
+  value = "3"
+
+[[service.variables]]
+  key = "GEMINI_TEMPERATURE"
+  value = "0.3"
+
+[[service.variables]]
+  key = "EMBEDDING_MODEL"
+  value = "text-embedding-004"
+
+[[service.variables]]
+  key = "EMBEDDING_DIMS"
+  value = "768"
+
+[[service.variables]]
+  key = "SIMILARITY_THRESHOLD"
+  value = "0.55"
+
+[[service.variables]]
+  key = "LATEX_EXTRACTION_CALIBRATION"
+  value = "4.0"
+
+[[service.variables]]
+  key = "MAX_JD_TEXT_LENGTH"
+  value = "15000"

@@ -1,0 +1,48 @@
+RAHUL SHARMA
+rahul.sharma@gmail.com | +91-98765-43210 | linkedin.com/in/rahulsharma | github.com/rahulsharma
+Bangalore, India
+
+PROFESSIONAL SUMMARY
+Full-stack developer with hands-on experience building MERN stack applications. AWS-certified with
+a strong foundation in JavaScript, React, and RESTful API design. Finalist at Smart India Hackathon
+2022 with a track record of delivering working software under tight deadlines. Seeking a Junior
+Software Engineer role to contribute to scalable product teams.
+
+WORK EXPERIENCE
+
+Software Engineering Intern | Infosys | Jun 2022 – Aug 2022
+- Developed 4 core modules of an internal HR analytics dashboard using React 18 and Node.js/Express,
+  reducing manual reporting effort by an estimated 6 hours/week for the HR team
+- Debugged and resolved 12 critical REST API defects across 3 microservices, improving API
+  reliability from 94% to 99.1% uptime during the internship period
+- Participated in daily standups, sprint planning, and retrospectives within a 9-member agile team
+
+PROJECTS
+
+Full-Stack To-Do & Task Manager | Personal Project | GitHub: github.com/rahulsharma/taskr
+- Built a fully functional MERN stack task manager with JWT authentication, real-time updates
+  via WebSockets, and role-based access control supporting 3 user permission levels
+- Designed RESTful API with 8 endpoints; deployed backend on AWS EC2 and frontend on Vercel
+- Implemented MongoDB indexing strategy reducing average query response time from 210ms to 45ms
+
+Smart India Hackathon 2022 – Finalist (Top 10/500+ teams)
+- Built an AI-powered crop disease detection web app using React frontend and Python/Flask API
+- Integrated TensorFlow Lite model achieving 89% classification accuracy on test dataset
+
+TECHNICAL SKILLS
+Languages  : JavaScript (ES6+), TypeScript, Python, Java
+Frontend   : React.js, HTML5, CSS3, Tailwind CSS
+Backend    : Node.js, Express.js, RESTful APIs
+Databases  : MySQL, MongoDB, PostgreSQL
+Cloud/Tools: AWS (EC2, S3, RDS), Docker (basics), Git, Postman, VS Code
+
+EDUCATION
+B.Tech, Computer Science and Engineering | VIT University | 2019–2023 | CGPA: 8.2/10
+
+CERTIFICATIONS
+- AWS Certified Cloud Practitioner (2023) | Credential ID: AWS-CCP-2023-XXXXX
+- HackerRank JavaScript (Gold Badge) – Top 5% globally
+
+ACHIEVEMENTS
+- Finalist, Smart India Hackathon 2022 (National Level, top 10 of 500+ teams)
+- 3rd Place, VIT University Inter-Departmental Coding Competition (2022)

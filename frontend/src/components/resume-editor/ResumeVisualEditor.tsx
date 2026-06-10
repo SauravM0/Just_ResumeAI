@@ -13,6 +13,7 @@ interface ResumeVisualEditorProps {
   recommendation: ResumeRecommendation;
   generationId: string;
   onSave: (updated: ResumeRecommendation) => void;
+  onImproveBullet?: (bulletId: string) => void;
 }
 
 type TabId = 'summary' | 'skills' | 'experience' | 'projects' | 'education' | 'order';
@@ -33,7 +34,7 @@ const TABS: Tab[] = [
 
 type SaveStatus = 'idle' | 'saving' | 'saved' | 'failed';
 
-export default function ResumeVisualEditor({ recommendation, generationId, onSave }: ResumeVisualEditorProps) {
+export default function ResumeVisualEditor({ recommendation, generationId, onSave, onImproveBullet }: ResumeVisualEditorProps) {
   const [editedResume, setEditedResume] = useState<ResumeRecommendation>(recommendation);
   const [activeTab, setActiveTab] = useState<TabId>('summary');
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle');
@@ -82,10 +83,15 @@ export default function ResumeVisualEditor({ recommendation, generationId, onSav
   }, [doSave]);
 
   const handleChange = useCallback((updated: ResumeRecommendation) => {
-    setEditedResume(updated);
+    // Generate a new version ID for local changes to mark score as stale
+    const versionedResume = {
+      ...updated,
+      version_id: `edit-${Date.now().toString(36)}`,
+    };
+    setEditedResume(versionedResume);
     setHasChanges(true);
     setSaveStatus('idle');
-    scheduleAutosave(updated);
+    scheduleAutosave(versionedResume);
   }, [scheduleAutosave]);
 
   const handleSaveNow = async () => {
@@ -123,6 +129,7 @@ export default function ResumeVisualEditor({ recommendation, generationId, onSav
         return (
           <ExperienceEditor
             experience={editedResume.experience.filter(e => e.included)}
+            onImproveBullet={onImproveBullet}
             onChange={(experience) => {
               const allExp = [...editedResume.experience];
               experience.forEach((exp) => {
@@ -137,6 +144,7 @@ export default function ResumeVisualEditor({ recommendation, generationId, onSav
         return (
           <ProjectsEditor
             projects={editedResume.projects.filter(p => p.included)}
+            onImproveBullet={onImproveBullet}
             onChange={(projects) => {
               const allProj = [...editedResume.projects];
               projects.forEach((proj) => {

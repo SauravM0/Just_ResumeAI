@@ -6,7 +6,7 @@ import type { MasterProfile } from './profile';
 import type { ParsedJD } from './jd';
 import type { ATSAlignmentReport } from './alignment';
 
-export type BulletStatus = 'pending' | 'accepted' | 'edited' | 'locked' | 'rejected';
+export type BulletStatus = 'pending' | 'accepted' | 'edited' | 'locked' | 'needs_repair' | 'rejected';
 
 export interface ResumeBullet {
   id: string;
@@ -16,6 +16,12 @@ export interface ResumeBullet {
   relevance_score: number;
   matched_keywords: string[];
   source_id?: string;
+  repair_note?: string;
+  star_score?: number;
+  has_strong_verb?: boolean;
+  has_context?: boolean;
+  has_outcome?: boolean;
+  has_banned_phrase?: boolean;
 }
 
 export interface ResumeExperienceEntry {
@@ -94,6 +100,8 @@ export interface ResumeContactInfo {
 
 export interface ResumeRecommendation {
   generation_id: string;
+  version_id: string;
+  content_hash?: string;
   target_title: string;
   summary?: string;
   contact?: ResumeContactInfo;
@@ -152,7 +160,9 @@ export interface SectionScore {
 }
 
 export interface ATSScore {
+  bullet_quality_score?: number;
   overall_score: number;
+  resume_version_id?: string;
   keyword_score: KeywordScore;
   skill_score: SkillScore;
   readability_score: ReadabilityScore;
@@ -161,8 +171,35 @@ export interface ATSScore {
   responsibility_score: number;
   title_alignment_score: number;
   missing_keywords: string[];
+  matched_supported_keywords?: string[];
+  unsupported_jd_keywords?: string[];
+  learning_focus_keywords?: string[];
   warnings: string[];
   recommendations: string[];
+  stuffing_warnings?: string[];
+  final_pdf_parse_status?: string;
+  score_breakdown?: Record<string, number>;
+  // Honest sub-scores
+  keyword_coverage_score?: number;
+  supported_coverage_score?: number;
+  formatting_readiness_score?: number;
+  seniority_honesty_score?: number;
+  validation_readiness_score?: number;
+  readability_warnings_count?: number;
+  export_ready?: boolean;
+}
+
+// ─── Validation Status (mirrors backend schemas/validation.py) ────────────
+
+export type ValidationSeverity = 'pass' | 'warning' | 'blocked';
+
+export interface ValidationStatus {
+  export_ready: boolean;
+  severity: ValidationSeverity;
+  blocked_reasons: string[];
+  warnings: string[];
+  repair_actions: string[];
+  user_actions: string[];
 }
 
 // ─── API Contracts ──────────────────────────────────────────────────────────
@@ -197,6 +234,51 @@ export interface ResumeValidateRequest {
 export interface ValidateResponse {
   generation_id: string;
   ats_score: ATSScore;
+  validation_status?: ValidationStatus;
+}
+
+export type KeywordConfirmationLevel = 'professional' | 'project' | 'basic' | 'learning' | 'no';
+
+export interface KeywordConfirmation {
+  keyword: string;
+  level: KeywordConfirmationLevel;
+}
+
+export interface ConfirmKeywordsRequest {
+  keywords: KeywordConfirmation[];
+}
+
+export interface ConfirmKeywordsResponse {
+  generation_id: string;
+  confirmed_keywords: KeywordConfirmation[];
+  usable_keywords: KeywordConfirmation[];
+}
+
+export interface FastResumeGenerateRequest {
+  profile: MasterProfile;
+  raw_jd_text?: string;
+  source_generation_id?: string;
+  job_title?: string;
+  company?: string;
+  emphasis?: string;
+  target_pages?: number;
+  save_to_database?: boolean;
+  ats_optimization_mode?: 'realistic' | 'aggressive';
+}
+
+export interface FastResumeGenerateResponse {
+  generation_id: string;
+  persisted: boolean;
+  resume_json: ResumeRecommendation;
+  ats_score: number;
+  matched_keywords: string[];
+  missing_keywords: string[];
+  extracted_keywords: string[];
+  confirmed_keywords: KeywordConfirmation[];
+  score_breakdown: Record<string, number>;
+  score_explanation: string[];
+  improvement_suggestions: string[];
+  score_disclaimer: string;
 }
 
 export type EligibilityStatus = 'match' | 'partial_match' | 'hard_mismatch';
@@ -226,6 +308,9 @@ export interface PipelineGenerateRequest {
   generate_pdf?: boolean;
   emphasis?: string;
   additional_alignment_text?: string;
+  ats_optimization_mode?: 'realistic' | 'aggressive';
+  target_ats_score?: number;
+  max_repair_attempts?: number;
 }
 
 export interface PipelinePdfResult {
@@ -235,9 +320,52 @@ export interface PipelinePdfResult {
   expires_at?: string;
   compile_errors: string[];
   compile_warnings: string[];
+  inspection_warnings: string[];
+  page_count?: number;
+  target_pages?: number;
+  compression_applied: boolean;
+  compression_actions: string[];
   generated_tex_path?: string;
   pdflatex_excerpt?: string;
   line_number?: number;
+}
+
+export interface OptimizationAttemptDiagnostics {
+  attempt: number;
+  json_score: ATSScore;
+  pdf_text_score?: ATSScore | null;
+  missing_keywords: string[];
+  matched_keywords: string[];
+  title_alignment_score: number;
+  skills_coverage_percent: number;
+  section_quality_score: number;
+  page_count?: number | null;
+  compile_success: boolean;
+  repair_actions: string[];
+  warnings: string[];
+}
+
+export interface ResumeOptimizationResult {
+  target_score: number;
+  target_pages: number;
+  attempts_used: number;
+  reached_target: boolean;
+  final_score_source: string;
+  final_pdf_text_score?: ATSScore | null;
+  final_json_score?: ATSScore | null;
+  final_page_count?: number | null;
+  final_pdf_path?: string | null;
+  final_latex_source: string;
+  final_recommendation: ResumeRecommendation;
+  diagnostics: OptimizationAttemptDiagnostics[];
+  score_history: number[];
+  missing_keywords: string[];
+  matched_keywords: string[];
+  title_alignment_score: number;
+  skills_coverage_percent: number;
+  section_quality_score: number;
+  score_explanation: string[];
+  compile_warnings: string[];
 }
 
 export interface PipelineGenerateResponse {
@@ -249,8 +377,13 @@ export interface PipelineGenerateResponse {
   alignment_report: ATSAlignmentReport;
   latex_source: string;
   pdf: PipelinePdfResult;
+  optimization: ResumeOptimizationResult;
   steps: PipelineStepStatus[];
   warnings: string[];
+  validation_status?: ValidationStatus;
+  recruiter_review?: RecruiterReview;
+  score_history?: number[];
+  strategy_history?: string[];
 }
 
 // ─── Direct Download Export ─────────────────────────────────────────────
@@ -260,7 +393,17 @@ export interface ExportFileResponse {
   filename: string;
   file_type: 'pdf' | 'docx';
   compile_warnings?: string[];
+  inspection_warnings?: string[];
+  page_count?: number;
+  compressed?: boolean;
+  compression_actions?: string[];
   regenerated?: boolean;
+  /** Validation gate repaired the resume before export */
+  validation_repaired?: boolean;
+  /** Validation warnings from the gate */
+  validation_warnings?: string[];
+  /** Whether export passed all validation checks */
+  export_ready?: boolean;
 }
 
 export interface GenerationFileInfo {
@@ -283,4 +426,20 @@ export interface GenerationFilesResponse {
   is_expired: boolean;
   regenerate_available: boolean;
   files: GenerationFileInfo[];
+}
+
+// ─── Quality Visualization ───────────────────────────────────────────────────
+
+export interface RecruiterReview {
+  overall_impression: number;
+  summary_assessment: string;
+  weak_bullet_ids: string[];
+  recommended_for_shortlist: boolean;
+  hr_flags: string[];
+}
+
+export interface ScoreHistoryEntry {
+  score: number;
+  strategy: string;
+  attempt: number;
 }

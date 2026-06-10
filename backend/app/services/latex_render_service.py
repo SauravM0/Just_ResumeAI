@@ -1,5 +1,5 @@
 """
-LaTeX render service - maps resume recommendation data to the fixed LaTeX template.
+LaTeX render service - maps resume recommendation data to the canonical main.tex template.
 Respects the full section_order from the recommendation.
 """
 
@@ -20,14 +20,27 @@ from app.schemas.resume import (
     ResumeSkillGroup,
     BulletStatus,
 )
-from app.utils.latex_escape import escape_latex, sanitize_latex_url
+from app.services.jd_sanitization_service import (
+    assert_render_text_safe,
+    assert_resume_recommendation_safe,
+    recommendation_to_plain_text,
+)
+from app.services.resume_validation_gate import validate_latex_for_export, validate_resume_for_export
+from app.services.skill_taxonomy_service import sanitize_resume_skill_groups
+from app.utils.latex_escape import (
+    escape_latex,
+    normalize_unicode_for_resume_export,
+    sanitize_latex_url,
+)
 
 logger = logging.getLogger(__name__)
+CANONICAL_LATEX_TEMPLATE = "main.tex"
 
 _ALLOWED_BULLET_STATUSES = {
     BulletStatus.ACCEPTED,
     BulletStatus.EDITED,
     BulletStatus.LOCKED,
+    BulletStatus.NEEDS_REPAIR,
     BulletStatus.PENDING,
 }
 
@@ -107,20 +120,15 @@ def sanitize_recommendation(recommendation: ResumeRecommendation) -> ResumeRecom
                     new_bullet = copy.deepcopy(bullet)
                     new_bullet.text = text
                     valid_proj_bullets.append(new_bullet)
-        if valid_proj_bullets:
+        description = _clean_pdf_text(proj.description)
+        if valid_proj_bullets or _is_valid_bullet_text(description):
             proj.bullets = valid_proj_bullets
+            proj.description = description
             cleaned_projects.append(proj)
 
     rec.projects = cleaned_projects
 
-    cleaned_skills: list[ResumeSkillGroup] = []
-    for sg in rec.skills:
-        clean = [s for s in sg.skills if _is_valid_bullet_text(_clean_pdf_text(s))]
-        if clean:
-            sg.skills = clean
-            cleaned_skills.append(sg)
-
-    rec.skills = cleaned_skills
+    rec.skills = sanitize_resume_skill_groups(rec.skills)
     rec.achievements = [
         item for item in rec.achievements
         if item.included and _is_valid_bullet_text(_clean_pdf_text(item.title))
@@ -138,17 +146,55 @@ def sanitize_recommendation(recommendation: ResumeRecommendation) -> ResumeRecom
     return rec
 
 
-def render_latex(recommendation: ResumeRecommendation) -> str:
+def get_section_order(is_fresher: bool) -> list[str]:
+    """
+    Return recommended visible section order.
+
+    Freshers lead with education/projects; experienced candidates lead with
+    track record.
+    """
+    if is_fresher:
+        return [
+            "contact",
+            "target_title",
+            "summary",
+            "education",
+            "skills",
+            "projects",
+            "experience",
+            "achievements",
+            "certifications",
+        ]
+    return [
+        "contact",
+        "target_title",
+        "summary",
+        "experience",
+        "projects",
+        "skills",
+        "education",
+        "achievements",
+        "certifications",
+    ]
+
+
+def render_latex(recommendation: ResumeRecommendation, *, is_fresher: bool = False) -> str:
     """
     Render the resume recommendation into LaTeX source code using the fixed template.
 
     Returns:
         LaTeX source string ready for PDF compilation.
     """
+    recommendation = validate_resume_for_export(recommendation).recommendation
     recommendation = sanitize_recommendation(recommendation)
+    assert_resume_recommendation_safe(recommendation)
+    assert_render_text_safe(
+        recommendation_to_plain_text(recommendation),
+        artifact="recommendation_plain_text",
+    )
     settings = get_settings()
     template_dir = Path(settings.LATEX_TEMPLATE_DIR)
-    context = _build_template_context(recommendation)
+    context = _build_template_context(recommendation, is_fresher=is_fresher)
 
     env = Environment(
         loader=FileSystemLoader(str(template_dir)),
@@ -160,8 +206,10 @@ def render_latex(recommendation: ResumeRecommendation) -> str:
         comment_start_string="<#",
         comment_end_string="#>",
     )
-    template = env.get_template("resume_template.tex")
+    template = env.get_template(CANONICAL_LATEX_TEMPLATE)
     latex_source = template.render(**context)
+    validate_latex_for_export(latex_source)
+    assert_render_text_safe(latex_source, artifact="latex_source")
 
     logger.info("[%s] LaTeX rendered (%s chars)", recommendation.generation_id, len(latex_source))
     return latex_source
@@ -180,7 +228,7 @@ def _repair_mojibake(value: str) -> str:
 
 
 def _normalize_pdf_text(value: str | None) -> str:
-    text = _repair_mojibake(value or "")
+    text = normalize_unicode_for_resume_export(_repair_mojibake(value or ""))
     text = text.replace("\\u0088", " ")
     text = text.replace("\u0088", " ")
     text = _CONTROL_CHAR_RE.sub(" ", text)
@@ -235,7 +283,7 @@ def _clean_inline_values(values: list[str]) -> list[str]:
     return cleaned
 
 
-def _build_template_context(rec: ResumeRecommendation) -> dict:
+def _build_template_context(rec: ResumeRecommendation, *, is_fresher: bool = False) -> dict:
     """Build the Jinja2 context for the LaTeX template, with all values escaped."""
     experiences = []
     for exp in rec.experience:
@@ -246,9 +294,9 @@ def _build_template_context(rec: ResumeRecommendation) -> dict:
             continue
         experiences.append({
             "title": escape_latex(exp.title),
-            "company_line": escape_latex(exp.company),
+            "company": escape_latex(exp.company),
             "location": escape_latex(exp.location or ""),
-            "date_range": escape_latex(f"{exp.start_date} -- {exp.end_date or 'Present'}"),
+            "date_range": escape_latex(_date_range(exp.start_date, exp.end_date or "Present")),
             "bullets": bullets,
         })
 
@@ -258,12 +306,11 @@ def _build_template_context(rec: ResumeRecommendation) -> dict:
             continue
         education.append({
             "institution": escape_latex(edu.institution),
+            "location": "",
             "degree_line": escape_latex(
                 edu.degree + (f", {edu.field_of_study}" if edu.field_of_study else "")
             ),
-            "date_range": escape_latex(
-                " -- ".join(part for part in [edu.start_date or "", edu.end_date or ""] if part)
-            ),
+            "date_range": escape_latex(_date_range(edu.start_date, edu.end_date)),
             "detail_line": escape_latex(
                 " | ".join(part for part in [f"GPA: {edu.gpa}" if edu.gpa else "", edu.honors or ""] if part)
             ),
@@ -284,6 +331,10 @@ def _build_template_context(rec: ResumeRecommendation) -> dict:
         if not proj.included:
             continue
         proj_bullets = _clean_bullet_texts(proj.bullets)
+        if not proj_bullets and proj.description:
+            description = _clean_pdf_text(proj.description)
+            if _is_valid_bullet_text(description):
+                proj_bullets = [escape_latex(description)]
         if not proj_bullets:
             continue
         projects.append({
@@ -325,10 +376,10 @@ def _build_template_context(rec: ResumeRecommendation) -> dict:
                 "items": items,
             })
 
-    section_order = rec.section_order if rec.section_order else [
-        "summary", "education", "technical skills", "experience",
-        "projects", "certifications", "achievements"
-    ]
+    section_order = _canonical_section_order(
+        get_section_order(is_fresher) if is_fresher else rec.section_order,
+        is_fresher=is_fresher,
+    )
 
     return {
         "contact_name": escape_latex(rec.contact.full_name) if rec.contact else "",
@@ -349,3 +400,34 @@ def _build_template_context(rec: ResumeRecommendation) -> dict:
         "custom_sections": custom_sections,
         "section_order_list": section_order,
     }
+
+
+def _canonical_section_order(section_order: list[str], *, is_fresher: bool = False) -> list[str]:
+    """Collapse legacy aliases into the single canonical main.tex section list."""
+    raw_order = section_order if section_order else get_section_order(is_fresher)
+    aliases = {
+        "technical skills": "skills",
+        "skill": "skills",
+        "awards": "achievements",
+        "awards & achievements": "achievements",
+    }
+    canonical: list[str] = []
+    for section in raw_order:
+        key = aliases.get(section.strip().lower(), section.strip().lower())
+        if key in {"contact", "target_title"} or key in canonical:
+            continue
+        canonical.append(key)
+
+    required = [
+        section
+        for section in get_section_order(is_fresher)
+        if section not in {"contact", "target_title"}
+    ]
+    for section in required:
+        if section not in canonical:
+            canonical.append(section)
+    return canonical
+
+
+def _date_range(start_date: str | None, end_date: str | None) -> str:
+    return " to ".join(part for part in [start_date or "", end_date or ""] if part)

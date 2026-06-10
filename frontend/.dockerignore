@@ -4,6 +4,7 @@
 
 node_modules
 dist
+build
 dist-ssr
 coverage
 .vite
@@ -12,8 +13,10 @@ test-results
 playwright-report
 *.tsbuildinfo
 logs
+*.log
 *.local
 
 .git
 .gitignore
 Dockerfile
+nul

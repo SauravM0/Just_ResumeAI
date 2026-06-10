@@ -4,23 +4,38 @@
 
 import { useState } from 'react';
 import type { ResumeExperienceEntry, ResumeBullet } from '../../types/resume';
+import LockedField from '../ui/LockedField';
+import { BulletQualityBadge } from '../ui/BulletQualityBadge';
 
 interface ExperienceEditorProps {
   experience: ResumeExperienceEntry[];
   onChange: (experience: ResumeExperienceEntry[]) => void;
+  onImproveBullet?: (bulletId: string) => void;
 }
 
 function BulletEditor({
   bullet,
   onChange,
   onDelete,
+  onImprove,
 }: {
   bullet: ResumeBullet;
   onChange: (text: string) => void;
   onDelete: () => void;
+  onImprove?: () => void;
 }) {
   return (
     <div className="bullet-editor">
+      {bullet.star_score !== undefined && (
+        <BulletQualityBadge
+          starScore={bullet.star_score}
+          hasAction={bullet.has_strong_verb ?? true}
+          hasContext={bullet.has_context ?? true}
+          hasOutcome={bullet.has_outcome ?? false}
+          hasBannedPhrase={bullet.has_banned_phrase ?? false}
+          onImprove={onImprove}
+        />
+      )}
       <span className="bullet-marker">•</span>
       <textarea
         className="textarea textarea-sm"
@@ -38,9 +53,11 @@ function BulletEditor({
 function EntryEditor({
   entry,
   onChange,
+  onImproveBullet,
 }: {
   entry: ResumeExperienceEntry;
   onChange: (entry: ResumeExperienceEntry) => void;
+  onImproveBullet?: (bulletId: string) => void;
 }) {
   const handleFieldChange = (field: keyof ResumeExperienceEntry, value: string) => {
     onChange({ ...entry, [field]: value });
@@ -80,12 +97,11 @@ function EntryEditor({
         />
       </div>
       <div className="entry-subheader">
-        <input
-          type="text"
-          className="input input-sm"
+        <LockedField
           value={entry.company}
-          onChange={(e) => handleFieldChange('company', e.target.value)}
-          placeholder="Company"
+          label="Company"
+          reason="Company name is verified from your profile and cannot be changed"
+          className="entry-company-field"
         />
         <div className="entry-dates">
           <input
@@ -121,6 +137,7 @@ function EntryEditor({
                 const realIdx = entry.bullets.findIndex(b => b.id === bullet.id);
                 handleDeleteBullet(realIdx);
               }}
+              onImprove={onImproveBullet ? () => onImproveBullet(bullet.id) : undefined}
             />
           ))}
         <button className="btn btn-ghost btn-sm" onClick={handleAddBullet}>
@@ -131,7 +148,7 @@ function EntryEditor({
   );
 }
 
-export default function ExperienceEditor({ experience, onChange }: ExperienceEditorProps) {
+export default function ExperienceEditor({ experience, onChange, onImproveBullet }: ExperienceEditorProps) {
   const [expandedId, setExpandedId] = useState<string | null>(
     experience.length > 0 ? experience[0].source_id : null
   );
@@ -169,6 +186,7 @@ export default function ExperienceEditor({ experience, onChange }: ExperienceEdi
               <div className="entry-card-content">
                 <EntryEditor
                   entry={entry}
+                  onImproveBullet={onImproveBullet}
                   onChange={(updated) => {
                     const newExp = experience.map(e =>
                       e.source_id === entry.source_id ? updated : e

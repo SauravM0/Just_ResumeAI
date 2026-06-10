@@ -4,6 +4,9 @@ import { getHistory, type HistoryItem } from '../lib/historyApi';
 import { getMyProfile } from '../lib/profileApi';
 import { useAppStore } from '../store/useAppStore';
 import { useAuthStore } from '../store/useAuthStore';
+// Query-keys (for future TanStack Query migration):
+//   profile:  ['profile', user?.id]  staleTime=5min
+//   history:  ['generations', user?.id]  staleTime=30s
 import PageHeader from '../components/ui/PageHeader';
 import AppCard from '../components/ui/AppCard';
 import EmptyState from '../components/ui/EmptyState';
@@ -11,7 +14,10 @@ import ErrorState from '../components/ui/ErrorState';
 import DashboardSkeleton from '../components/dashboard/DashboardSkeleton';
 import ProfileCompletionCard from '../components/dashboard/ProfileCompletionCard';
 import QuickActions from '../components/dashboard/QuickActions';
+import OnboardingWelcome from '../components/OnboardingWelcome';
 import type { MasterProfile } from '../types/profile';
+
+const APP_VERSION = import.meta.env.VITE_APP_VERSION || '0.1.0';
 
 function getDaysUntilExpiry(expiryDate: string | null): number | null {
   if (!expiryDate) return null;
@@ -57,12 +63,21 @@ export default function Dashboard() {
   const [recentHistory, setRecentHistory] = useState<HistoryItem[]>([]);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [historyError, setHistoryError] = useState(false);
+  const [showWhatsNew, setShowWhatsNew] = useState(false);
 
   const fetchData = useCallback(() => {
     setProfileLoading(true);
     setHistoryLoading(true);
     setProfileError(false);
     setHistoryError(false);
+
+    // ── Query keys (for future TanStack Query migration) ──
+    //   profile:   QUERY_KEYS.profile(user?.id)
+    //   history:   QUERY_KEYS.generations(user?.id)
+    //
+    // Cache config reference:
+    //   profile:   staleTime=CACHE_CONFIG.profile.staleTime (5 min)
+    //   history:   staleTime=CACHE_CONFIG.generations.staleTime (30 s)
 
     getMyProfile()
       .then((res) => {
@@ -89,6 +104,15 @@ export default function Dashboard() {
     fetchData();
   }, [fetchData]);
 
+  useEffect(() => {
+    const key = 'justresume:lastSeenVersion';
+    const previous = window.localStorage.getItem(key);
+    if (previous && previous !== APP_VERSION) {
+      setShowWhatsNew(true);
+    }
+    window.localStorage.setItem(key, APP_VERSION);
+  }, []);
+
   const hasProfile = Boolean(profile?.contact.full_name);
   const loading = profileLoading || historyLoading;
   const hasError = profileError && historyError;
@@ -96,7 +120,7 @@ export default function Dashboard() {
 
   const handleNewResume = () => {
     resetGeneration();
-    navigate('/jd');
+    navigate('/create-resume');
   };
 
   const averageAts = recentHistory.length > 0
@@ -133,6 +157,23 @@ export default function Dashboard() {
   }
 
   // First-time user — no profile
+  if (!historyError && recentHistory.length === 0 && !historyLoading && !profileLoading) {
+    return (
+      <div className="animate-fade-in">
+        <PageHeader
+          title={`Welcome${user?.user_metadata?.full_name ? `, ${user.user_metadata.full_name.split(' ')[0]}` : ''}!`}
+          subtitle="Let's create your first tailored resume."
+        />
+        <OnboardingWelcome />
+        {hasProfile && (
+          <div style={{ marginTop: 'var(--space-lg)' }}>
+            <ProfileCompletionCard profile={profile} />
+          </div>
+        )}
+      </div>
+    );
+  }
+
   if (!hasProfile && !profileLoading && recentHistory.length === 0) {
     return (
       <div className="animate-fade-in">
@@ -246,6 +287,20 @@ export default function Dashboard() {
 
   return (
     <div className="animate-fade-in">
+      {showWhatsNew && (
+        <div className="warning-banner warning-info" style={{ marginBottom: 'var(--space-md)' }}>
+          <span>New</span>
+          <div>
+            <strong>What's new in v{APP_VERSION}</strong>
+            <p style={{ margin: 0, marginTop: '2px', fontSize: '0.8rem' }}>
+              Improved ATS scoring, export readiness checks, and production monitoring are now live.
+            </p>
+          </div>
+          <button className="btn btn-ghost btn-sm" onClick={() => setShowWhatsNew(false)}>
+            Dismiss
+          </button>
+        </div>
+      )}
       <PageHeader
         title={userName ? `Welcome back, ${userName}` : 'Dashboard'}
         subtitle="Here's your resume activity at a glance."

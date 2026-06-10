@@ -26,6 +26,12 @@ backend/.env
 backend/.env.*
 backend/output/
 backend/output/**
+backend/tmp/
+backend/tmp/**
+backend/temp/
+backend/temp/**
+backend/uploads/
+backend/uploads/**
 backend/__pycache__/
 backend/**/__pycache__/
 backend/**/*.pyc
@@ -34,8 +40,10 @@ backend/*.sqlite3
 
 node_modules/
 dist/
+build/
 frontend/node_modules
 frontend/dist
+frontend/build
 frontend/dist-ssr
 frontend/coverage
 frontend/.env
@@ -58,3 +66,6 @@ venv
 *.7z
 *.rar
 .vercel
+nul
+backend/nul
+frontend/nul

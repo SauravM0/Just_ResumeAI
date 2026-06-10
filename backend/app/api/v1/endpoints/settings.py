@@ -24,6 +24,7 @@ async def get_settings(current_user: CurrentUser = Depends(get_current_user)):
             user_id=record.user_id,
             target_resume_pages=record.target_resume_pages,
             preferred_tone=record.preferred_tone,
+            aggressive_ats_default=record.aggressive_ats_default,
             created_at=record.created_at.isoformat() if record.created_at else None,
             updated_at=record.updated_at.isoformat() if record.updated_at else None,
         )
@@ -48,6 +49,7 @@ async def update_settings(
             user_id=record.user_id,
             target_resume_pages=record.target_resume_pages,
             preferred_tone=record.preferred_tone,
+            aggressive_ats_default=record.aggressive_ats_default,
             created_at=record.created_at.isoformat() if record.created_at else None,
             updated_at=record.updated_at.isoformat() if record.updated_at else None,
         )
